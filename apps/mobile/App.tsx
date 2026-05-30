@@ -1,15 +1,17 @@
 import { StatusBar } from "expo-status-bar";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ComponentRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View
 } from "react-native";
-import MapView, { PROVIDER_DEFAULT, UrlTile } from "react-native-maps";
+import MapView, { PROVIDER_DEFAULT, UrlTile, type Region } from "react-native-maps";
 import { forestLayerConfigs, type ForestLayerId } from "@forest/shared";
 
 type EarthEngineStatus = {
@@ -18,6 +20,15 @@ type EarthEngineStatus = {
   latestAvailableDate?: string;
   message: string;
 };
+type SearchResult = {
+  id: string;
+  label: string;
+  lat: number;
+  lng: number;
+  zoom: number;
+  type: "state" | "city";
+};
+type SearchStatus = "idle" | "loading" | "empty" | "error";
 
 const DEFAULT_TILE_API_BASE_URL = "http://127.0.0.1:3001";
 const TILE_API_BASE_URL =
@@ -27,6 +38,12 @@ const initialLayers: Record<ForestLayerId, boolean> = {
   treeCover: true,
   forestLoss: false,
   landCover: true
+};
+const defaultRegion: Region = {
+  latitude: 39.5,
+  longitude: -98.35,
+  latitudeDelta: 35,
+  longitudeDelta: 35
 };
 
 function isDateValue(value?: string) {
@@ -63,21 +80,36 @@ function clampDate(value: string, minValue: string, maxValue: string) {
 }
 
 function buildTileUrl(layerId: ForestLayerId, date: string) {
-  const params = new URLSearchParams({
-    date,
-    layerId,
-    x: "{x}",
-    y: "{y}",
-    z: "{z}"
-  });
+  const params = [
+    `date=${encodeURIComponent(date)}`,
+    `layerId=${encodeURIComponent(layerId)}`,
+    "x={x}",
+    "y={y}",
+    "z={z}"
+  ].join("&");
 
-  return `${TILE_API_BASE_URL}/api/earth-engine/tiles?${params.toString()}`;
+  return `${TILE_API_BASE_URL}/api/earth-engine/tiles?${params}`;
+}
+
+function regionForTarget(target: SearchResult): Region {
+  const delta = Math.max(0.08, Math.min(35, 360 / 2 ** target.zoom));
+
+  return {
+    latitude: target.lat,
+    longitude: target.lng,
+    latitudeDelta: delta,
+    longitudeDelta: delta
+  };
 }
 
 export default function App() {
+  const mapRef = useRef<ComponentRef<typeof MapView> | null>(null);
   const [selectedDate, setSelectedDate] = useState("");
   const [earliestDate, setEarliestDate] = useState(MIN_DYNAMIC_WORLD_DATE);
   const [latestDate, setLatestDate] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchStatus, setSearchStatus] = useState<SearchStatus>("idle");
   const [status, setStatus] = useState<EarthEngineStatus>({
     configured: false,
     message: "Checking Google Earth Engine tiles."
@@ -103,6 +135,50 @@ export default function App() {
     },
     [earliestDate, latestDate]
   );
+  const selectSearchResult = useCallback((result: SearchResult) => {
+    setSearchStatus("idle");
+    setSearchResults([]);
+    setSearchQuery(result.label);
+    Keyboard.dismiss();
+    mapRef.current?.animateToRegion(regionForTarget(result), 900);
+  }, []);
+  const handleSearch = useCallback(async () => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchResults([]);
+      setSearchStatus("empty");
+      return;
+    }
+
+    setSearchStatus("loading");
+
+    try {
+      const response = await fetch(
+        `${TILE_API_BASE_URL}/api/search?q=${encodeURIComponent(query)}`
+      );
+      if (!response.ok) {
+        throw new Error(`Search request failed with ${response.status}.`);
+      }
+
+      const payload = (await response.json()) as { results?: SearchResult[] };
+      const results = payload.results ?? [];
+      setSearchResults(results);
+
+      if (results.length === 0) {
+        setSearchStatus("empty");
+        return;
+      }
+
+      if (results.length === 1) {
+        selectSearchResult(results[0]);
+      } else {
+        setSearchStatus("idle");
+      }
+    } catch {
+      setSearchResults([]);
+      setSearchStatus("error");
+    }
+  }, [searchQuery, selectSearchResult]);
 
   useEffect(() => {
     let ignore = false;
@@ -171,14 +247,10 @@ export default function App() {
     <SafeAreaView style={styles.screen}>
       <StatusBar style="light" />
       <MapView
+        ref={mapRef}
         provider={PROVIDER_DEFAULT}
         style={StyleSheet.absoluteFill}
-        initialRegion={{
-          latitude: 39.5,
-          longitude: -98.35,
-          latitudeDelta: 35,
-          longitudeDelta: 35
-        }}
+        initialRegion={defaultRegion}
         minZoomLevel={3}
         maxZoomLevel={14}
       >
@@ -202,6 +274,53 @@ export default function App() {
       <View style={styles.overlay}>
         <Text style={styles.title}>US Dynamic World</Text>
         <Text style={styles.subtitle}>Earth Engine tiles · Layers active: {activeCount}</Text>
+
+        <View style={styles.searchBlock}>
+          <Text style={styles.searchLabel}>Search</Text>
+          <View style={styles.searchForm}>
+            <TextInput
+              accessibilityLabel="Search city or state"
+              autoCapitalize="words"
+              clearButtonMode="while-editing"
+              onChangeText={setSearchQuery}
+              onSubmitEditing={handleSearch}
+              placeholder="City or state"
+              placeholderTextColor="#7f9188"
+              returnKeyType="search"
+              style={styles.searchInput}
+              value={searchQuery}
+            />
+            <Pressable
+              accessibilityLabel="Search map"
+              disabled={searchStatus === "loading"}
+              onPress={handleSearch}
+              style={[styles.searchButton, searchStatus === "loading" && styles.disabledButton]}
+            >
+              <Text style={styles.searchButtonText}>
+                {searchStatus === "loading" ? "..." : "Go"}
+              </Text>
+            </Pressable>
+          </View>
+          {searchStatus === "empty" ? (
+            <Text style={styles.searchHint}>No matching city or state found.</Text>
+          ) : null}
+          {searchStatus === "error" ? (
+            <Text style={styles.searchHint}>Search is unavailable.</Text>
+          ) : null}
+          {searchResults.length > 1 ? (
+            <View style={styles.searchResults}>
+              {searchResults.slice(0, 3).map((result) => (
+                <Pressable
+                  key={result.id}
+                  onPress={() => selectSearchResult(result)}
+                  style={styles.searchResult}
+                >
+                  <Text style={styles.searchResultText}>{result.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+        </View>
 
         <View style={styles.statusBox}>
           {loadingStatus ? <ActivityIndicator color="#dff2e6" /> : null}
@@ -282,6 +401,62 @@ const styles = StyleSheet.create({
   subtitle: {
     color: "#b9c9bf",
     marginTop: 4
+  },
+  searchBlock: {
+    marginTop: 12
+  },
+  searchLabel: {
+    color: "#f6f8f3",
+    fontWeight: "700",
+    marginBottom: 6
+  },
+  searchForm: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8
+  },
+  searchInput: {
+    backgroundColor: "#eef5ed",
+    borderRadius: 6,
+    color: "#14231c",
+    flex: 1,
+    fontSize: 16,
+    minHeight: 42,
+    paddingHorizontal: 10
+  },
+  searchButton: {
+    alignItems: "center",
+    backgroundColor: "#2f8f5b",
+    borderRadius: 6,
+    height: 42,
+    justifyContent: "center",
+    width: 56
+  },
+  searchButtonText: {
+    color: "#f6f8f3",
+    fontWeight: "800"
+  },
+  searchHint: {
+    color: "#c8d6cd",
+    fontSize: 12,
+    marginTop: 6
+  },
+  searchResults: {
+    borderColor: "#426554",
+    borderRadius: 6,
+    borderWidth: 1,
+    marginTop: 8,
+    overflow: "hidden"
+  },
+  searchResult: {
+    borderBottomColor: "#315346",
+    borderBottomWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 9
+  },
+  searchResultText: {
+    color: "#f6f8f3",
+    fontWeight: "600"
   },
   statusBox: {
     alignItems: "center",

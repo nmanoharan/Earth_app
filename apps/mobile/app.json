@@ -12,6 +12,7 @@
     "ios": {
       "bundleIdentifier": "org.oneearthonechance.dynamicworldmobile",
       "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
