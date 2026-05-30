@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+import { authorizeMobileApiRequest } from "@/lib/mobileApiAuth";
+
+export const runtime = "nodejs";
 
 type SearchResult = {
   id: string;
@@ -125,6 +128,11 @@ async function searchCities(query: string): Promise<SearchResult[]> {
 }
 
 export async function GET(request: Request) {
+  const unauthorizedResponse = authorizeMobileApiRequest(request);
+  if (unauthorizedResponse) {
+    return unauthorizedResponse;
+  }
+
   const { searchParams } = new URL(request.url);
   const query = normalizeQuery(searchParams.get("q") ?? "");
 

@@ -5,11 +5,17 @@ import {
   getDynamicWorldTileCacheStatus,
   getLatestDynamicWorldDate
 } from "@/lib/earthEngine";
+import { authorizeMobileApiRequest } from "@/lib/mobileApiAuth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const unauthorizedResponse = authorizeMobileApiRequest(request);
+  if (unauthorizedResponse) {
+    return unauthorizedResponse;
+  }
+
   const configStatus = await getEarthEngineConfigStatus();
   let latestAvailableDate: string | undefined;
   let latestAvailableDateError: string | undefined;

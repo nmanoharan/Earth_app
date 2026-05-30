@@ -33,6 +33,7 @@ type SearchStatus = "idle" | "loading" | "empty" | "error";
 const DEFAULT_TILE_API_BASE_URL = "http://127.0.0.1:3001";
 const TILE_API_BASE_URL =
   process.env.EXPO_PUBLIC_TILE_API_BASE_URL?.replace(/\/$/, "") ?? DEFAULT_TILE_API_BASE_URL;
+const MOBILE_API_TOKEN = process.env.EXPO_PUBLIC_MOBILE_API_TOKEN?.trim() ?? "";
 const MIN_DYNAMIC_WORLD_DATE = "2015-07-15";
 const MIN_MAP_ZOOM = 3;
 const MAX_MAP_ZOOM = 14;
@@ -88,10 +89,22 @@ function buildTileUrl(layerId: ForestLayerId, date: string, refreshKey: number) 
     "x={x}",
     "y={y}",
     "z={z}",
-    `refresh=${refreshKey}`
-  ].join("&");
+    `refresh=${refreshKey}`,
+    MOBILE_API_TOKEN ? `mobileToken=${encodeURIComponent(MOBILE_API_TOKEN)}` : ""
+  ]
+    .filter(Boolean)
+    .join("&");
 
   return `${TILE_API_BASE_URL}/api/earth-engine/tiles?${params}`;
+}
+
+function appendMobileApiToken(url: string) {
+  if (!MOBILE_API_TOKEN) {
+    return url;
+  }
+
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}mobileToken=${encodeURIComponent(MOBILE_API_TOKEN)}`;
 }
 
 function regionForTarget(target: SearchResult): Region {
@@ -182,7 +195,7 @@ export default function App() {
 
     try {
       const response = await fetch(
-        `${TILE_API_BASE_URL}/api/search?q=${encodeURIComponent(query)}`
+        appendMobileApiToken(`${TILE_API_BASE_URL}/api/search?q=${encodeURIComponent(query)}`)
       );
       if (!response.ok) {
         throw new Error(`Search request failed with ${response.status}.`);
@@ -213,7 +226,9 @@ export default function App() {
 
     async function loadStatus() {
       try {
-        const response = await fetch(`${TILE_API_BASE_URL}/api/earth-engine/status`);
+        const response = await fetch(
+          appendMobileApiToken(`${TILE_API_BASE_URL}/api/earth-engine/status`)
+        );
         if (!response.ok) {
           throw new Error(`Status request failed with ${response.status}.`);
         }

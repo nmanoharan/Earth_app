@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDynamicWorldTile, getDynamicWorldTileCacheStatus } from "@/lib/earthEngine";
+import { authorizeMobileApiRequest } from "@/lib/mobileApiAuth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +20,11 @@ function dateFromRequest(value: string | null, fallbackYear: number) {
 }
 
 export async function GET(request: NextRequest) {
+  const unauthorizedResponse = authorizeMobileApiRequest(request);
+  if (unauthorizedResponse) {
+    return unauthorizedResponse;
+  }
+
   const searchParams = request.nextUrl.searchParams;
   const layerId = searchParams.get("layerId");
   const year = parseTileNumber(searchParams.get("year"));
