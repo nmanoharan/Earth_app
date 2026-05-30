@@ -1,0 +1,13 @@
+.env
+.env.*
+node_modules
+.expo
+.expo-shared
+ios
+android
+dist
+build
+coverage
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

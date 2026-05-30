@@ -1,0 +1,29 @@
+.DS_Store
+
+# Dependencies
+node_modules/
+apps/*/node_modules/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.service-account.json
+*service-account*.json
+
+# Next.js / Expo / native generated output
+.next/
+apps/*/.next/
+.expo/
+apps/*/.expo/
+.expo-shared/
+ios/
+android/
+dist/
+build/
+coverage/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

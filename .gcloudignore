@@ -1,0 +1,12 @@
+.git
+.gcloudignore
+**/.DS_Store
+**/.env
+**/.env.local
+**/.next
+**/node_modules
+apps/mobile/*
+!apps/mobile/package.json
+docs
+node_modules
+npm-debug.log

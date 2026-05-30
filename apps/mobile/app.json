@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Dynamic World Mobile",
+    "slug": "dynamic-world-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "dynamic-world-mobile",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "bundleIdentifier": "org.oneearthonechance.dynamicworldmobile",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      },
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#193127"
+      }
+    }
+  }
+}

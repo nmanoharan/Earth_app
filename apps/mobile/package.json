@@ -1,0 +1,32 @@
+{
+  "name": "forest-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo/AppEntry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "build:ios": "eas build --platform ios --profile production",
+    "build:ios:preview": "eas build --platform ios --profile preview",
+    "build:ios:simulator": "eas build --platform ios --profile simulator",
+    "ios": "expo run:ios",
+    "submit:ios": "eas submit --platform ios --profile production",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@forest/shared": "0.1.0",
+    "@react-native-community/slider": "^4.5.2",
+    "expo": "~51.0.21",
+    "expo-status-bar": "~1.12.1",
+    "react": "18.2.0",
+    "react-native": "0.74.3",
+    "react-native-maps": "1.14.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.7",
+    "@types/react": "^18.3.3",
+    "@types/react-native": "^0.73.0",
+    "babel-preset-expo": "^11.0.0",
+    "typescript": "^5.5.3"
+  }
+}
