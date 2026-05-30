@@ -81,13 +81,14 @@ function clampDate(value: string, minValue: string, maxValue: string) {
   return value;
 }
 
-function buildTileUrl(layerId: ForestLayerId, date: string) {
+function buildTileUrl(layerId: ForestLayerId, date: string, refreshKey: number) {
   const params = [
     `date=${encodeURIComponent(date)}`,
     `layerId=${encodeURIComponent(layerId)}`,
     "x={x}",
     "y={y}",
-    "z={z}"
+    "z={z}",
+    `refresh=${refreshKey}`
   ].join("&");
 
   return `${TILE_API_BASE_URL}/api/earth-engine/tiles?${params}`;
@@ -111,6 +112,7 @@ function zoomFromRegion(region: Region) {
 
 export default function App() {
   const mapRef = useRef<ComponentRef<typeof MapView> | null>(null);
+  const lastTileZoomLevelRef = useRef(zoomFromRegion(defaultRegion));
   const [selectedDate, setSelectedDate] = useState("");
   const [earliestDate, setEarliestDate] = useState(MIN_DYNAMIC_WORLD_DATE);
   const [latestDate, setLatestDate] = useState("");
@@ -121,8 +123,10 @@ export default function App() {
     configured: false,
     message: "Checking Google Earth Engine tiles."
   });
+  const [controlsExpanded, setControlsExpanded] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [tileZoomLevel, setTileZoomLevel] = useState(zoomFromRegion(defaultRegion));
+  const [tileRefreshKey, setTileRefreshKey] = useState(0);
   const [visibleLayers, setVisibleLayers] =
     useState<Record<ForestLayerId, boolean>>(initialLayers);
 
@@ -143,12 +147,22 @@ export default function App() {
     },
     [earliestDate, latestDate]
   );
-  const handleRegionChangeComplete = useCallback((region: Region) => {
+  const refreshTilesForRegion = useCallback((region: Region) => {
     const nextZoomLevel = zoomFromRegion(region);
-    setTileZoomLevel((currentZoomLevel) =>
-      currentZoomLevel === nextZoomLevel ? currentZoomLevel : nextZoomLevel
-    );
+    if (lastTileZoomLevelRef.current === nextZoomLevel) {
+      return;
+    }
+
+    lastTileZoomLevelRef.current = nextZoomLevel;
+    setTileZoomLevel(nextZoomLevel);
+    setTileRefreshKey((currentKey) => currentKey + 1);
   }, []);
+  const handleRegionChangeComplete = useCallback(
+    (region: Region) => {
+      refreshTilesForRegion(region);
+    },
+    [refreshTilesForRegion]
+  );
   const selectSearchResult = useCallback((result: SearchResult) => {
     setSearchStatus("idle");
     setSearchResults([]);
@@ -251,10 +265,10 @@ export default function App() {
         .map((layer, index) => ({
           ...layer,
           opacity: layer.id === "landCover" ? 0.86 : 0.8,
-          url: selectedDate ? buildTileUrl(layer.id, selectedDate) : "",
+          url: selectedDate ? buildTileUrl(layer.id, selectedDate, tileRefreshKey) : "",
           zIndex: 20 + index
         })),
-    [selectedDate, visibleLayers]
+    [selectedDate, tileRefreshKey, visibleLayers]
   );
 
   return (
@@ -267,6 +281,7 @@ export default function App() {
         initialRegion={defaultRegion}
         minZoomLevel={MIN_MAP_ZOOM}
         maxZoomLevel={MAX_MAP_ZOOM}
+        onRegionChange={refreshTilesForRegion}
         onRegionChangeComplete={handleRegionChangeComplete}
       >
         {tileLayers.map(
@@ -287,110 +302,123 @@ export default function App() {
         )}
       </MapView>
 
-      <View style={styles.overlay}>
-        <Text style={styles.title}>US Dynamic World</Text>
-        <Text style={styles.subtitle}>Earth Engine tiles · Layers active: {activeCount}</Text>
-
-        <View style={styles.searchBlock}>
-          <Text style={styles.searchLabel}>Search</Text>
-          <View style={styles.searchForm}>
-            <TextInput
-              accessibilityLabel="Search city or state"
-              autoCapitalize="words"
-              clearButtonMode="while-editing"
-              onChangeText={setSearchQuery}
-              onSubmitEditing={handleSearch}
-              placeholder="City or state"
-              placeholderTextColor="#7f9188"
-              returnKeyType="search"
-              style={styles.searchInput}
-              value={searchQuery}
-            />
-            <Pressable
-              accessibilityLabel="Search map"
-              disabled={searchStatus === "loading"}
-              onPress={handleSearch}
-              style={[styles.searchButton, searchStatus === "loading" && styles.disabledButton]}
-            >
-              <Text style={styles.searchButtonText}>
-                {searchStatus === "loading" ? "..." : "Go"}
-              </Text>
-            </Pressable>
+      <View style={styles.searchOverlay}>
+        <View style={styles.searchForm}>
+          <TextInput
+            accessibilityLabel="Search city or state"
+            autoCapitalize="words"
+            clearButtonMode="while-editing"
+            onChangeText={setSearchQuery}
+            onSubmitEditing={handleSearch}
+            placeholder="City or state"
+            placeholderTextColor="#7f9188"
+            returnKeyType="search"
+            style={styles.searchInput}
+            value={searchQuery}
+          />
+          <Pressable
+            accessibilityLabel="Search map"
+            disabled={searchStatus === "loading"}
+            onPress={handleSearch}
+            style={[styles.searchButton, searchStatus === "loading" && styles.disabledButton]}
+          >
+            <Text style={styles.searchButtonText}>
+              {searchStatus === "loading" ? "..." : "Go"}
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel={controlsExpanded ? "Hide map legend" : "Show map legend"}
+            onPress={() => setControlsExpanded((isExpanded) => !isExpanded)}
+            style={styles.panelToggle}
+          >
+            <Text style={styles.panelToggleText}>{controlsExpanded ? "Hide" : "Layers"}</Text>
+          </Pressable>
+        </View>
+        {searchStatus === "empty" ? (
+          <Text style={styles.searchHint}>No matching city or state found.</Text>
+        ) : null}
+        {searchStatus === "error" ? (
+          <Text style={styles.searchHint}>Search is unavailable.</Text>
+        ) : null}
+        {searchResults.length > 1 ? (
+          <View style={styles.searchResults}>
+            {searchResults.slice(0, 3).map((result) => (
+              <Pressable
+                key={result.id}
+                onPress={() => selectSearchResult(result)}
+                style={styles.searchResult}
+              >
+                <Text style={styles.searchResultText}>{result.label}</Text>
+              </Pressable>
+            ))}
           </View>
-          {searchStatus === "empty" ? (
-            <Text style={styles.searchHint}>No matching city or state found.</Text>
-          ) : null}
-          {searchStatus === "error" ? (
-            <Text style={styles.searchHint}>Search is unavailable.</Text>
-          ) : null}
-          {searchResults.length > 1 ? (
-            <View style={styles.searchResults}>
-              {searchResults.slice(0, 3).map((result) => (
-                <Pressable
-                  key={result.id}
-                  onPress={() => selectSearchResult(result)}
-                  style={styles.searchResult}
-                >
-                  <Text style={styles.searchResultText}>{result.label}</Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
-        </View>
-
-        <View style={styles.statusBox}>
-          {loadingStatus ? <ActivityIndicator color="#dff2e6" /> : null}
-          <Text style={styles.statusText}>{status.message}</Text>
-        </View>
-
-        <ScrollView style={styles.layers} contentContainerStyle={styles.layersContent}>
-          {forestLayerConfigs.map((layer) => (
-            <Pressable
-              key={layer.id}
-              style={styles.layerItem}
-              onPress={() =>
-                setVisibleLayers((prev) => ({
-                  ...prev,
-                  [layer.id]: !prev[layer.id]
-                }))
-              }
-            >
-              <View style={[styles.swatch, { backgroundColor: layer.color }]} />
-              <View style={styles.layerText}>
-                <Text style={styles.layerTitle}>{layer.label}</Text>
-                <Text style={styles.layerDesc}>{layer.description}</Text>
-              </View>
-              <Text style={styles.toggle}>{visibleLayers[layer.id] ? "ON" : "OFF"}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-
-        <View style={styles.dateBlock}>
-          <Text style={styles.dateLabel}>Date</Text>
-          <View style={styles.stepper}>
-            <Pressable
-              accessibilityLabel="Previous Dynamic World day"
-              disabled={!canStepBack}
-              style={[styles.stepButton, !canStepBack && styles.disabledButton]}
-              onPress={() => updateDate(addDays(selectedDate, -1))}
-            >
-              <Text style={styles.stepButtonText}>-</Text>
-            </Pressable>
-            <Text style={styles.dateValue}>{selectedDate || "Loading"}</Text>
-            <Pressable
-              accessibilityLabel="Next Dynamic World day"
-              disabled={!canStepForward}
-              style={[styles.stepButton, !canStepForward && styles.disabledButton]}
-              onPress={() => updateDate(addDays(selectedDate, 1))}
-            >
-              <Text style={styles.stepButtonText}>+</Text>
-            </Pressable>
-          </View>
-          <Text style={styles.hint}>
-            Available {earliestDate} to {latestDate || "loading"}. Tile API: {TILE_API_BASE_URL}
-          </Text>
-        </View>
+        ) : null}
       </View>
+
+      {controlsExpanded ? (
+        <View style={styles.controlSheet}>
+          <View style={styles.sheetHeader}>
+            <View>
+              <Text style={styles.title}>US Dynamic World</Text>
+              <Text style={styles.subtitle}>Layers active: {activeCount}</Text>
+            </View>
+            <Text style={styles.zoomBadge}>z{tileZoomLevel}</Text>
+          </View>
+
+          <View style={styles.statusBox}>
+            {loadingStatus ? <ActivityIndicator color="#dff2e6" /> : null}
+            <Text style={styles.statusText}>{status.message}</Text>
+          </View>
+
+          <ScrollView style={styles.layers} contentContainerStyle={styles.layersContent}>
+            {forestLayerConfigs.map((layer) => (
+              <Pressable
+                key={layer.id}
+                style={styles.layerItem}
+                onPress={() =>
+                  setVisibleLayers((prev) => ({
+                    ...prev,
+                    [layer.id]: !prev[layer.id]
+                  }))
+                }
+              >
+                <View style={[styles.swatch, { backgroundColor: layer.color }]} />
+                <View style={styles.layerText}>
+                  <Text style={styles.layerTitle}>{layer.label}</Text>
+                  <Text style={styles.layerDesc}>{layer.description}</Text>
+                </View>
+                <Text style={styles.toggle}>{visibleLayers[layer.id] ? "ON" : "OFF"}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+
+          <View style={styles.dateBlock}>
+            <Text style={styles.dateLabel}>Date</Text>
+            <View style={styles.stepper}>
+              <Pressable
+                accessibilityLabel="Previous Dynamic World day"
+                disabled={!canStepBack}
+                style={[styles.stepButton, !canStepBack && styles.disabledButton]}
+                onPress={() => updateDate(addDays(selectedDate, -1))}
+              >
+                <Text style={styles.stepButtonText}>-</Text>
+              </Pressable>
+              <Text style={styles.dateValue}>{selectedDate || "Loading"}</Text>
+              <Pressable
+                accessibilityLabel="Next Dynamic World day"
+                disabled={!canStepForward}
+                style={[styles.stepButton, !canStepForward && styles.disabledButton]}
+                onPress={() => updateDate(addDays(selectedDate, 1))}
+              >
+                <Text style={styles.stepButtonText}>+</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.hint}>
+              Available {earliestDate} to {latestDate || "loading"}. Tile API: {TILE_API_BASE_URL}
+            </Text>
+          </View>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -400,7 +428,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#0d1f1a"
   },
-  overlay: {
+  searchOverlay: {
     margin: 12,
     marginTop: 24,
     backgroundColor: "rgba(13,31,26,0.86)",
@@ -408,6 +436,30 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 8,
     padding: 12
+  },
+  controlSheet: {
+    margin: 12,
+    marginTop: 0,
+    backgroundColor: "rgba(13,31,26,0.86)",
+    borderColor: "#355244",
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 12
+  },
+  sheetHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between"
+  },
+  zoomBadge: {
+    backgroundColor: "#eef5ed",
+    borderRadius: 6,
+    color: "#14231c",
+    fontSize: 12,
+    fontWeight: "800",
+    overflow: "hidden",
+    paddingHorizontal: 8,
+    paddingVertical: 5
   },
   title: {
     color: "#f6f8f3",
@@ -417,14 +469,6 @@ const styles = StyleSheet.create({
   subtitle: {
     color: "#b9c9bf",
     marginTop: 4
-  },
-  searchBlock: {
-    marginTop: 12
-  },
-  searchLabel: {
-    color: "#f6f8f3",
-    fontWeight: "700",
-    marginBottom: 6
   },
   searchForm: {
     alignItems: "center",
@@ -450,6 +494,20 @@ const styles = StyleSheet.create({
   },
   searchButtonText: {
     color: "#f6f8f3",
+    fontWeight: "800"
+  },
+  panelToggle: {
+    alignItems: "center",
+    backgroundColor: "#eef5ed",
+    borderRadius: 6,
+    height: 42,
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    minWidth: 66
+  },
+  panelToggleText: {
+    color: "#14231c",
+    fontSize: 12,
     fontWeight: "800"
   },
   searchHint: {
