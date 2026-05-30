@@ -34,6 +34,8 @@ const DEFAULT_TILE_API_BASE_URL = "http://127.0.0.1:3001";
 const TILE_API_BASE_URL =
   process.env.EXPO_PUBLIC_TILE_API_BASE_URL?.replace(/\/$/, "") ?? DEFAULT_TILE_API_BASE_URL;
 const MIN_DYNAMIC_WORLD_DATE = "2015-07-15";
+const MIN_MAP_ZOOM = 3;
+const MAX_MAP_ZOOM = 14;
 const initialLayers: Record<ForestLayerId, boolean> = {
   treeCover: true,
   forestLoss: false,
@@ -102,6 +104,11 @@ function regionForTarget(target: SearchResult): Region {
   };
 }
 
+function zoomFromRegion(region: Region) {
+  const rawZoom = Math.log2(360 / Math.max(region.longitudeDelta, 0.0001));
+  return Math.max(MIN_MAP_ZOOM, Math.min(MAX_MAP_ZOOM, Math.round(rawZoom)));
+}
+
 export default function App() {
   const mapRef = useRef<ComponentRef<typeof MapView> | null>(null);
   const [selectedDate, setSelectedDate] = useState("");
@@ -115,6 +122,7 @@ export default function App() {
     message: "Checking Google Earth Engine tiles."
   });
   const [loadingStatus, setLoadingStatus] = useState(true);
+  const [tileZoomLevel, setTileZoomLevel] = useState(zoomFromRegion(defaultRegion));
   const [visibleLayers, setVisibleLayers] =
     useState<Record<ForestLayerId, boolean>>(initialLayers);
 
@@ -135,6 +143,12 @@ export default function App() {
     },
     [earliestDate, latestDate]
   );
+  const handleRegionChangeComplete = useCallback((region: Region) => {
+    const nextZoomLevel = zoomFromRegion(region);
+    setTileZoomLevel((currentZoomLevel) =>
+      currentZoomLevel === nextZoomLevel ? currentZoomLevel : nextZoomLevel
+    );
+  }, []);
   const selectSearchResult = useCallback((result: SearchResult) => {
     setSearchStatus("idle");
     setSearchResults([]);
@@ -251,19 +265,21 @@ export default function App() {
         provider={PROVIDER_DEFAULT}
         style={StyleSheet.absoluteFill}
         initialRegion={defaultRegion}
-        minZoomLevel={3}
-        maxZoomLevel={14}
+        minZoomLevel={MIN_MAP_ZOOM}
+        maxZoomLevel={MAX_MAP_ZOOM}
+        onRegionChangeComplete={handleRegionChangeComplete}
       >
         {tileLayers.map(
           (layer) =>
             layer.url && (
               <UrlTile
-                key={`${layer.id}-${selectedDate}`}
+                key={`${layer.id}-${selectedDate}-z${tileZoomLevel}`}
                 urlTemplate={layer.url}
-                maximumZ={14}
-                minimumZ={3}
+                maximumNativeZ={MAX_MAP_ZOOM}
+                maximumZ={MAX_MAP_ZOOM}
+                minimumZ={MIN_MAP_ZOOM}
                 opacity={layer.opacity}
-                tileCacheMaxAge={60 * 60 * 24 * 7}
+                tileCacheMaxAge={60 * 10}
                 tileSize={256}
                 zIndex={layer.zIndex}
               />
