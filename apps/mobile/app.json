@@ -6,7 +6,9 @@
     "orientation": "portrait",
     "scheme": "dynamic-world-mobile",
     "userInterfaceStyle": "automatic",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "bundleIdentifier": "org.oneearthonechance.dynamicworldmobile",
       "infoPlist": {
@@ -20,6 +22,12 @@
       "adaptiveIcon": {
         "backgroundColor": "#193127"
       }
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "a1fb1f0e-a180-4b1e-88a1-f55747a29a45"
+      }
+    },
+    "owner": "nmanoharan"
   }
 }
