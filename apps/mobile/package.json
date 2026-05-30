@@ -2,7 +2,7 @@
   "name": "forest-mobile",
   "version": "0.1.0",
   "private": true,
-  "main": "expo/AppEntry",
+  "main": "index.js",
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
