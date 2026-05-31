@@ -11,23 +11,23 @@ export type LayerConfig = {
 export const forestLayerConfigs: LayerConfig[] = [
   {
     id: "treeCover",
-    label: "Dynamic World Tree Probability",
+    label: "Tree cover",
     color: "#238443",
     visibleByDefault: true,
-    description: "Earth Engine 30-day Dynamic World trees probability mosaic"
+    description: "Dynamic World trees probability"
   },
   {
     id: "forestLoss",
-    label: "Tree Probability Drop vs Previous Year",
+    label: "Forest loss",
     color: "#d7301f",
-    visibleByDefault: false,
-    description: "Year-over-year drop between 30-day Dynamic World trees mosaics"
+    visibleByDefault: true,
+    description: "Tree probability drop vs previous year"
   },
   {
     id: "landCover",
-    label: "Dynamic World Land Cover Classes",
+    label: "Land cover",
     color: "#397d49",
-    visibleByDefault: true,
-    description: "Earth Engine 30-day Dynamic World land-cover label mosaic"
+    visibleByDefault: false,
+    description: "Dynamic World land-cover classes"
   }
 ];

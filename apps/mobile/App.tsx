@@ -29,6 +29,7 @@ type SearchResult = {
   type: "state" | "city";
 };
 type SearchStatus = "idle" | "loading" | "empty" | "error";
+type TileLoadStatus = "idle" | "loading" | "loaded";
 
 const DEFAULT_TILE_API_BASE_URL = "http://127.0.0.1:3001";
 const TILE_API_BASE_URL =
@@ -38,11 +39,13 @@ const MIN_DYNAMIC_WORLD_DATE = "2015-07-15";
 const MIN_MAP_ZOOM = 3;
 const MAX_EARTH_ENGINE_NATIVE_ZOOM = 14;
 const MAX_MAP_ZOOM = 20;
-const initialLayers: Record<ForestLayerId, boolean> = {
-  treeCover: true,
-  forestLoss: false,
-  landCover: true
-};
+const initialLayers = forestLayerConfigs.reduce(
+  (layers, layer) => ({
+    ...layers,
+    [layer.id]: layer.visibleByDefault
+  }),
+  {} as Record<ForestLayerId, boolean>
+);
 const defaultRegion: Region = {
   latitude: 39.5,
   longitude: -98.35,
@@ -139,6 +142,7 @@ export default function App() {
   });
   const [controlsExpanded, setControlsExpanded] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(true);
+  const [tileLoadStatus, setTileLoadStatus] = useState<TileLoadStatus>("idle");
   const [tileZoomLevel, setTileZoomLevel] = useState(zoomFromRegion(defaultRegion));
   const [tileRefreshKey, setTileRefreshKey] = useState(0);
   const [visibleLayers, setVisibleLayers] =
@@ -150,6 +154,23 @@ export default function App() {
   );
   const canStepBack = Boolean(selectedDate && selectedDate > earliestDate);
   const canStepForward = Boolean(selectedDate && latestDate && selectedDate < latestDate);
+  const activeLayerLabels = useMemo(
+    () =>
+      forestLayerConfigs
+        .filter((layer) => visibleLayers[layer.id])
+        .map((layer) => layer.label),
+    [visibleLayers]
+  );
+  const activeLayerKey = activeLayerLabels.join("|");
+  const selectedDisplayDate = selectedDate || "latest date";
+  const tileProgressText =
+    activeLayerLabels.length === 0
+      ? "Tiles: no layers selected"
+      : tileLoadStatus === "loading"
+        ? `Tiles: queued/rendering ${activeLayerLabels.join(", ")} for ${selectedDisplayDate}`
+        : tileLoadStatus === "loaded"
+          ? `Tiles: ${activeLayerLabels.join(", ")} loaded for ${selectedDisplayDate}`
+          : `Tiles: waiting for ${activeLayerLabels.join(", ")}`;
 
   const updateDate = useCallback(
     (nextDate: string) => {
@@ -287,6 +308,22 @@ export default function App() {
     [selectedDate, tileRefreshKey, visibleLayers]
   );
 
+  useEffect(() => {
+    if (!selectedDate || activeLayerLabels.length === 0) {
+      setTileLoadStatus("idle");
+      return;
+    }
+
+    setTileLoadStatus("loading");
+    const loadedTimer = setTimeout(() => {
+      setTileLoadStatus("loaded");
+    }, 2200);
+
+    return () => {
+      clearTimeout(loadedTimer);
+    };
+  }, [activeLayerKey, activeLayerLabels.length, selectedDate, tileRefreshKey, tileZoomLevel]);
+
   return (
     <SafeAreaView style={styles.screen}>
       <StatusBar style="light" />
@@ -356,6 +393,7 @@ export default function App() {
         {searchStatus === "error" ? (
           <Text style={styles.searchHint}>Search is unavailable.</Text>
         ) : null}
+        <Text style={styles.tileProgress}>{tileProgressText}</Text>
         {searchResults.length > 1 ? (
           <View style={styles.searchResults}>
             {searchResults.slice(0, 3).map((result) => (
@@ -407,6 +445,17 @@ export default function App() {
                 <View style={styles.layerText}>
                   <Text style={styles.layerTitle}>{layer.label}</Text>
                   <Text style={styles.layerDesc}>{layer.description}</Text>
+                  <Text style={styles.layerStatus}>
+                    {!status.configured
+                      ? "Connect Earth Engine"
+                      : !selectedDate
+                        ? "Reading latest Dynamic World date"
+                        : visibleLayers[layer.id]
+                          ? tileLoadStatus === "loaded"
+                            ? `Earth Engine ${selectedDisplayDate} tiles loaded`
+                            : `Queued/rendering Earth Engine ${selectedDisplayDate} tiles`
+                          : "Layer off"}
+                  </Text>
                 </View>
                 <Text style={styles.toggle}>{visibleLayers[layer.id] ? "ON" : "OFF"}</Text>
               </Pressable>
@@ -536,6 +585,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 6
   },
+  tileProgress: {
+    color: "#b9c9bf",
+    fontSize: 10,
+    marginTop: 6
+  },
   searchResults: {
     borderColor: "#426554",
     borderRadius: 6,
@@ -595,6 +649,11 @@ const styles = StyleSheet.create({
   layerDesc: {
     color: "#b9c9bf",
     fontSize: 12
+  },
+  layerStatus: {
+    color: "#92aa9c",
+    fontSize: 10,
+    marginTop: 2
   },
   toggle: {
     color: "#9fd5bb",
