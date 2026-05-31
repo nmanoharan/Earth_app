@@ -36,7 +36,8 @@ const TILE_API_BASE_URL =
 const MOBILE_API_TOKEN = process.env.EXPO_PUBLIC_MOBILE_API_TOKEN?.trim() ?? "";
 const MIN_DYNAMIC_WORLD_DATE = "2015-07-15";
 const MIN_MAP_ZOOM = 3;
-const MAX_MAP_ZOOM = 14;
+const MAX_EARTH_ENGINE_NATIVE_ZOOM = 14;
+const MAX_MAP_ZOOM = 20;
 const initialLayers: Record<ForestLayerId, boolean> = {
   treeCover: true,
   forestLoss: false,
@@ -305,7 +306,7 @@ export default function App() {
               <UrlTile
                 key={`${layer.id}-${selectedDate}-z${tileZoomLevel}`}
                 urlTemplate={layer.url}
-                maximumNativeZ={MAX_MAP_ZOOM}
+                maximumNativeZ={MAX_EARTH_ENGINE_NATIVE_ZOOM}
                 maximumZ={MAX_MAP_ZOOM}
                 minimumZ={MIN_MAP_ZOOM}
                 opacity={layer.opacity}
@@ -377,7 +378,12 @@ export default function App() {
               <Text style={styles.title}>US Dynamic World</Text>
               <Text style={styles.subtitle}>Layers active: {activeCount}</Text>
             </View>
-            <Text style={styles.zoomBadge}>z{tileZoomLevel}</Text>
+            <Text style={styles.zoomBadge}>
+              z{tileZoomLevel}
+              {tileZoomLevel > MAX_EARTH_ENGINE_NATIVE_ZOOM
+                ? ` / tile z${MAX_EARTH_ENGINE_NATIVE_ZOOM}`
+                : ""}
+            </Text>
           </View>
 
           <View style={styles.statusBox}>
