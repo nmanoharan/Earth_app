@@ -1,16 +1,18 @@
 {
   "expo": {
-    "name": "Dynamic World Mobile",
+    "name": "OEOC Earth",
     "slug": "dynamic-world-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "scheme": "dynamic-world-mobile",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
       "bundleIdentifier": "org.oneearthonechance.dynamicworldmobile",
+      "icon": "./assets/icon.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSAppTransportSecurity": {
@@ -21,6 +23,7 @@
     },
     "android": {
       "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#193127"
       }
     },
