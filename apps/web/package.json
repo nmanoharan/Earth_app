@@ -1,6 +1,6 @@
 {
   "name": "us-forest-cover-prototype",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@forest/shared": "0.1.0",
+    "@forest/shared": "1.0.0",
     "@google/earthengine": "^1.7.28",
     "google-auth-library": "^7.14.1",
     "leaflet": "^1.9.4",

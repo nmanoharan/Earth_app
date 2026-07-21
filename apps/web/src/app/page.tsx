@@ -1,20 +1,51 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { forestLayerConfigs, type ForestLayerId } from "@forest/shared";
 import { type MapTarget } from "@/components/map/MapView";
+
+type TimelineCacheStatus = {
+  complete: boolean;
+  enabledDates: string[];
+  progress: number;
+  readyCount: number;
+  readyDates: string[];
+  totalCount: number;
+  warmed?: {
+    date: string;
+    layerId: ForestLayerId;
+    status: number;
+  };
+};
+type PersistedPreferences = {
+  searchQuery?: string;
+  searchTarget?: MapTarget;
+  timelineEndDate?: string;
+  timelineStartDate?: string;
+  visibleLayers?: Partial<Record<ForestLayerId, boolean>>;
+};
 
 const DynamicMap = dynamic(() => import("@/components/map/MapView").then((m) => m.MapView), {
   ssr: false
 });
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MIN_DYNAMIC_WORLD_DATE = "2015-07-15";
-const MIN_DYNAMIC_WORLD_YEAR = 2015;
-const MAX_DYNAMIC_WORLD_YEAR = new Date().getFullYear();
+const PREFERENCES_STORAGE_KEY = "oeoc-earth-preferences-v1";
 const TIMELINE_STEP_MS = 5000;
 const TIMELINE_SLIDER_COMMIT_DELAY_MS = 650;
+const TIMELINE_VISIBLE_MONTH_COUNT = 12;
+const TIMELINE_YEAR_STEP_MONTHS = 12;
+const TIMELINE_CACHE_ACTIVE_INTERVAL_MS = 300;
+const TIMELINE_CACHE_COMPLETE_INTERVAL_MS = 15_000;
 const HIDDEN_LAYERS: Record<ForestLayerId, boolean> = {
   treeCover: false,
   forestLoss: false,
@@ -76,18 +107,6 @@ function formatDateValue(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
-function addDays(value: string, days: number) {
-  const date = parseDateValue(value);
-  date.setUTCDate(date.getUTCDate() + days);
-  return formatDateValue(date);
-}
-
-function daysBetween(startDate: string, endDate: string) {
-  const start = parseDateValue(startDate).getTime();
-  const end = parseDateValue(endDate).getTime();
-  return Math.max(0, Math.round((end - start) / MS_PER_DAY));
-}
-
 function minDate(firstDate: string, secondDate: string) {
   return firstDate <= secondDate ? firstDate : secondDate;
 }
@@ -108,12 +127,124 @@ function clampDate(value: string, minValue: string, maxValue: string) {
   return value;
 }
 
-function dateFromYearStart(year: number, minimumDate: string) {
-  return maxDate(`${year}-01-01`, minimumDate);
+function isSameUtcMonth(firstDate: string, secondDate: string) {
+  const first = parseDateValue(firstDate);
+  const second = parseDateValue(secondDate);
+
+  return (
+    first.getUTCFullYear() === second.getUTCFullYear() &&
+    first.getUTCMonth() === second.getUTCMonth()
+  );
 }
 
-function dateFromYearEnd(year: number) {
-  return `${year}-12-31`;
+function pushMonthlyDate(dates: string[], nextDate: string) {
+  const previousDate = dates.at(-1);
+
+  if (!previousDate) {
+    dates.push(nextDate);
+    return;
+  }
+
+  if (previousDate === nextDate) {
+    return;
+  }
+
+  if (isSameUtcMonth(previousDate, nextDate)) {
+    dates[dates.length - 1] = nextDate;
+    return;
+  }
+
+  dates.push(nextDate);
+}
+
+function buildMonthlyTimelineDates(startDate: string, endDate: string) {
+  if (!isDateValue(startDate) || !isDateValue(endDate) || endDate < startDate) {
+    return [];
+  }
+
+  const dates: string[] = [];
+  const start = parseDateValue(startDate);
+  const end = parseDateValue(endDate);
+  const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+
+  while (cursor <= end) {
+    const monthEndDate = formatDateValue(
+      new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0))
+    );
+
+    pushMonthlyDate(dates, clampDate(monthEndDate, startDate, endDate));
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+
+  pushMonthlyDate(dates, endDate);
+
+  return dates;
+}
+
+function nearestDateIndex(dates: string[], targetDate: string) {
+  if (dates.length === 0 || !isDateValue(targetDate)) {
+    return 0;
+  }
+
+  const targetTime = parseDateValue(targetDate).getTime();
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  dates.forEach((date, index) => {
+    const distance = Math.abs(parseDateValue(date).getTime() - targetTime);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  });
+
+  return bestIndex;
+}
+
+function isMapTarget(value: unknown): value is MapTarget {
+  const target = value as Partial<MapTarget>;
+
+  return (
+    typeof target?.id === "string" &&
+    typeof target.label === "string" &&
+    typeof target.lat === "number" &&
+    typeof target.lng === "number" &&
+    typeof target.zoom === "number" &&
+    (target.type === "state" || target.type === "city")
+  );
+}
+
+function readPersistedPreferences() {
+  try {
+    const rawPreferences = window.localStorage.getItem(PREFERENCES_STORAGE_KEY);
+    if (!rawPreferences) {
+      return {};
+    }
+
+    const parsed = JSON.parse(rawPreferences) as PersistedPreferences;
+
+    return {
+      searchQuery: typeof parsed.searchQuery === "string" ? parsed.searchQuery : undefined,
+      searchTarget: isMapTarget(parsed.searchTarget) ? parsed.searchTarget : undefined,
+      timelineEndDate: isDateValue(parsed.timelineEndDate ?? "")
+        ? parsed.timelineEndDate
+        : undefined,
+      timelineStartDate: isDateValue(parsed.timelineStartDate ?? "")
+        ? parsed.timelineStartDate
+        : undefined,
+      visibleLayers: parsed.visibleLayers
+    } satisfies PersistedPreferences;
+  } catch {
+    return {};
+  }
+}
+
+function writePersistedPreferences(preferences: PersistedPreferences) {
+  try {
+    window.localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(preferences));
+  } catch {
+    // Preferences are helpful but not required for the map to function.
+  }
 }
 
 export default function HomePage() {
@@ -127,16 +258,21 @@ export default function HomePage() {
   const [searchStatus, setSearchStatus] = useState<"idle" | "loading" | "error" | "empty">("idle");
   const [timelineEnabled, setTimelineEnabled] = useState(false);
   const [timelineLoop, setTimelineLoop] = useState(false);
-  const [timelineMinYear, setTimelineMinYear] = useState(MIN_DYNAMIC_WORLD_YEAR);
-  const [timelineMaxYear, setTimelineMaxYear] = useState(MAX_DYNAMIC_WORLD_YEAR);
+  const [timelineStartDate, setTimelineStartDate] = useState("");
+  const [timelineEndDate, setTimelineEndDate] = useState("");
+  const [timelineCacheStatus, setTimelineCacheStatus] = useState<TimelineCacheStatus>();
+  const [timelineCacheWarming, setTimelineCacheWarming] = useState(false);
+  const [timelineWindowEndIndexPreference, setTimelineWindowEndIndexPreference] =
+    useState<number>();
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [dataSourceStatus, setDataSourceStatus] = useState({
     configured: false,
     message: "Checking Google Earth Engine configuration."
   });
   const [visibleLayers, setVisibleLayers] = useState<Record<ForestLayerId, boolean>>({
     treeCover: true,
-    forestLoss: false,
-    landCover: true
+    forestLoss: true,
+    landCover: false
   });
   const [tileStatus, setTileStatus] = useState<
     Partial<Record<ForestLayerId, { loaded: number; error: number }>>
@@ -144,52 +280,144 @@ export default function HomePage() {
   const timelineCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const hasLatestAvailableDate = Boolean(latestAvailableDate);
-  const availableMinYear = useMemo(
-    () => parseDateValue(earliestAvailableDate).getUTCFullYear(),
-    [earliestAvailableDate]
-  );
-  const dynamicWorldYearsAsc = useMemo(
-    () =>
-      Array.from(
-        { length: MAX_DYNAMIC_WORLD_YEAR - availableMinYear + 1 },
-        (_, index) => availableMinYear + index
-      ),
-    [availableMinYear]
-  );
-  const rangeStartCandidate = useMemo(
-    () => dateFromYearStart(Math.min(timelineMinYear, timelineMaxYear), earliestAvailableDate),
-    [earliestAvailableDate, timelineMaxYear, timelineMinYear]
-  );
-  const rangeEndDate = useMemo(
+  const availableTimelineDates = useMemo(
     () =>
       latestAvailableDate
-        ? minDate(dateFromYearEnd(Math.max(timelineMinYear, timelineMaxYear)), latestAvailableDate)
-        : earliestAvailableDate,
-    [earliestAvailableDate, latestAvailableDate, timelineMaxYear, timelineMinYear]
+        ? buildMonthlyTimelineDates(earliestAvailableDate, latestAvailableDate)
+        : [],
+    [earliestAvailableDate, latestAvailableDate]
   );
+  const oldestTimelineDate = availableTimelineDates[0] ?? earliestAvailableDate;
+  const latestTimelineDate =
+    availableTimelineDates.at(-1) ?? latestAvailableDate ?? earliestAvailableDate;
+  const configuredStartDate = timelineStartDate
+    ? clampDate(timelineStartDate, oldestTimelineDate, latestTimelineDate)
+    : oldestTimelineDate;
+  const configuredEndDate = timelineEndDate
+    ? clampDate(timelineEndDate, oldestTimelineDate, latestTimelineDate)
+    : latestTimelineDate;
   const rangeStartDate = useMemo(
-    () => (rangeEndDate < rangeStartCandidate ? rangeEndDate : rangeStartCandidate),
-    [rangeEndDate, rangeStartCandidate]
+    () => minDate(configuredStartDate, configuredEndDate),
+    [configuredEndDate, configuredStartDate]
+  );
+  const rangeEndDate = useMemo(
+    () => maxDate(configuredStartDate, configuredEndDate),
+    [configuredEndDate, configuredStartDate]
   );
   const selectedDisplayDate = selectedDate
     ? clampDate(selectedDate, rangeStartDate, rangeEndDate)
     : hasLatestAvailableDate
       ? rangeEndDate
       : "";
-  const timelineDayCount = useMemo(
-    () => daysBetween(rangeStartDate, rangeEndDate),
+  const monthlyTimelineDates = useMemo(
+    () => buildMonthlyTimelineDates(rangeStartDate, rangeEndDate),
     [rangeEndDate, rangeStartDate]
   );
-  const timelineDisplayDate = timelinePreviewDate
+  const fullTimelineMaxIndex = Math.max(0, monthlyTimelineDates.length - 1);
+  const timelineLayerIds = useMemo(() => {
+    const selectedLayerIds = forestLayerConfigs
+      .filter((layer) => visibleLayers[layer.id])
+      .map((layer) => layer.id);
+
+    return selectedLayerIds.length > 0 ? selectedLayerIds : (["treeCover"] as ForestLayerId[]);
+  }, [visibleLayers]);
+  const selectedDateTimelineIndex = useMemo(
+    () => nearestDateIndex(monthlyTimelineDates, selectedDate || rangeEndDate),
+    [monthlyTimelineDates, rangeEndDate, selectedDate]
+  );
+  const timelineWindowMinEndIndex = Math.min(
+    fullTimelineMaxIndex,
+    Math.max(0, TIMELINE_VISIBLE_MONTH_COUNT - 1)
+  );
+  const effectiveTimelineWindowEndIndex = Math.min(
+    fullTimelineMaxIndex,
+    Math.max(
+      timelineWindowMinEndIndex,
+      timelineWindowEndIndexPreference ?? fullTimelineMaxIndex
+    )
+  );
+  const timelineWindowStartIndex = Math.max(
+    0,
+    effectiveTimelineWindowEndIndex - TIMELINE_VISIBLE_MONTH_COUNT + 1
+  );
+  const timelineWindowStartDate =
+    monthlyTimelineDates[timelineWindowStartIndex] ?? rangeStartDate;
+  const timelineWindowEndDate =
+    monthlyTimelineDates[effectiveTimelineWindowEndIndex] ?? rangeEndDate;
+  const cachedTimelineDates = useMemo(() => {
+    const enabledDateSet = new Set(timelineCacheStatus?.enabledDates ?? []);
+    const enabledDates = monthlyTimelineDates.filter(
+      (date) =>
+        date >= timelineWindowStartDate &&
+        date <= timelineWindowEndDate &&
+        enabledDateSet.has(date)
+    );
+
+    if (enabledDates.length > 0) {
+      return enabledDates;
+    }
+
+    return timelineWindowEndDate ? [timelineWindowEndDate] : [];
+  }, [monthlyTimelineDates, timelineCacheStatus, timelineWindowEndDate, timelineWindowStartDate]);
+  const cachedTimelineMaxIndex = Math.max(0, cachedTimelineDates.length - 1);
+  const cachedRangeStartDate = cachedTimelineDates[0] ?? rangeEndDate;
+  const cachedRangeEndDate = cachedTimelineDates[cachedTimelineMaxIndex] ?? rangeEndDate;
+  const hasMultipleCachedTimelineDates = cachedTimelineDates.length > 1;
+  const activeMapDate = timelinePreviewDate
     ? clampDate(timelinePreviewDate, rangeStartDate, rangeEndDate)
     : selectedDisplayDate;
+  const timelineDisplayDate = activeMapDate;
   const timelineDisplayDateIndex = useMemo(
     () =>
-      timelineDisplayDate
-        ? Math.min(timelineDayCount, daysBetween(rangeStartDate, timelineDisplayDate))
-        : 0,
-    [rangeStartDate, timelineDayCount, timelineDisplayDate]
+      Math.max(
+        timelineWindowStartIndex,
+        Math.min(effectiveTimelineWindowEndIndex, nearestDateIndex(monthlyTimelineDates, activeMapDate))
+      ),
+    [
+      activeMapDate,
+      effectiveTimelineWindowEndIndex,
+      monthlyTimelineDates,
+      timelineWindowStartIndex
+    ]
   );
+  const selectedTimelineIndex = useMemo(
+    () => nearestDateIndex(monthlyTimelineDates, activeMapDate),
+    [activeMapDate, monthlyTimelineDates]
+  );
+  const cachedTimelineStartIndex = useMemo(
+    () => nearestDateIndex(monthlyTimelineDates, cachedRangeStartDate),
+    [cachedRangeStartDate, monthlyTimelineDates]
+  );
+  const timelineReadyStartIndex = Math.min(
+    effectiveTimelineWindowEndIndex,
+    Math.max(cachedTimelineStartIndex, timelineWindowStartIndex)
+  );
+  const timelineWindowSpan = Math.max(
+    1,
+    effectiveTimelineWindowEndIndex - timelineWindowStartIndex
+  );
+  const cacheReadyStartPercent =
+    ((timelineReadyStartIndex - timelineWindowStartIndex) / timelineWindowSpan) * 100;
+  const timelineSliderStyle = {
+    "--cache-ready-start": `${Math.min(99.2, Math.max(0, cacheReadyStartPercent))}%`
+  } as CSSProperties;
+  const hasMultipleSelectableTimelineDates = Boolean(
+    hasLatestAvailableDate && timelineWindowStartIndex < effectiveTimelineWindowEndIndex
+  );
+  const previousTimelineWindowEndIndex =
+    effectiveTimelineWindowEndIndex - TIMELINE_YEAR_STEP_MONTHS;
+  const nextTimelineWindowEndIndex =
+    effectiveTimelineWindowEndIndex + TIMELINE_YEAR_STEP_MONTHS;
+  const canJumpTimelineBackYear = Boolean(
+    hasLatestAvailableDate && previousTimelineWindowEndIndex >= timelineWindowMinEndIndex
+  );
+  const canJumpTimelineForwardYear = Boolean(
+    hasLatestAvailableDate && nextTimelineWindowEndIndex <= fullTimelineMaxIndex
+  );
+  const timelineCacheComplete = Boolean(timelineCacheStatus?.complete);
+  const timelineCacheReadyText = timelineCacheStatus
+    ? `${timelineCacheStatus.readyCount}/${timelineCacheStatus.totalCount} months ready`
+    : "Checking cached months";
   const activeCount = useMemo(
     () => Object.values(visibleLayers).filter(Boolean).length,
     [visibleLayers]
@@ -201,6 +429,17 @@ export default function HomePage() {
         : HIDDEN_LAYERS,
     [dataSourceStatus.configured, hasLatestAvailableDate, selectedDate, visibleLayers]
   );
+  const activeTimelineDateReady = Boolean(
+    activeMapDate &&
+      (timelineCacheStatus?.readyDates.includes(activeMapDate) ||
+        timelineCacheStatus?.enabledDates.includes(activeMapDate) ||
+        timelineLayerIds.every((layerId) => (tileStatus[layerId]?.loaded ?? 0) > 0))
+  );
+  const timelineActiveStatusText = activeTimelineDateReady
+    ? "ready"
+    : timelineCacheWarming
+      ? "warming"
+      : "checking";
 
   const updateSelectedDate = useCallback(
     (nextDate: string) => {
@@ -210,9 +449,17 @@ export default function HomePage() {
 
       setTimelinePreviewDate("");
       setTileStatus({});
-      setSelectedDate(clampDate(nextDate, rangeStartDate, rangeEndDate));
+      const clampedDate = clampDate(nextDate, rangeStartDate, rangeEndDate);
+      setSelectedDate(
+        monthlyTimelineDates[nearestDateIndex(monthlyTimelineDates, clampedDate)] ?? rangeEndDate
+      );
     },
-    [hasLatestAvailableDate, rangeEndDate, rangeStartDate]
+    [
+      hasLatestAvailableDate,
+      monthlyTimelineDates,
+      rangeEndDate,
+      rangeStartDate
+    ]
   );
   const clearTimelineCommitTimer = useCallback(() => {
     if (timelineCommitTimerRef.current) {
@@ -235,6 +482,7 @@ export default function HomePage() {
 
       const clampedDate = clampDate(nextDate, rangeStartDate, rangeEndDate);
       setTimelinePreviewDate(clampedDate);
+      setTileStatus({});
       clearTimelineCommitTimer();
       timelineCommitTimerRef.current = setTimeout(() => {
         commitTimelineDate(clampedDate);
@@ -246,6 +494,38 @@ export default function HomePage() {
       hasLatestAvailableDate,
       rangeEndDate,
       rangeStartDate
+    ]
+  );
+  const shiftTimelineWindowByYear = useCallback(
+    (direction: -1 | 1) => {
+      if (!hasLatestAvailableDate || monthlyTimelineDates.length === 0) {
+        return;
+      }
+
+      const nextWindowEndIndex =
+        direction < 0 ? previousTimelineWindowEndIndex : nextTimelineWindowEndIndex;
+
+      if (
+        (direction < 0 && !canJumpTimelineBackYear) ||
+        (direction > 0 && !canJumpTimelineForwardYear)
+      ) {
+        return;
+      }
+
+      setTimelineWindowEndIndexPreference(nextWindowEndIndex);
+      setTimelineCacheStatus(undefined);
+      setTimelinePreviewDate("");
+      setTileStatus({});
+      setSelectedDate(monthlyTimelineDates[nextWindowEndIndex] ?? timelineWindowEndDate);
+    },
+    [
+      canJumpTimelineBackYear,
+      canJumpTimelineForwardYear,
+      hasLatestAvailableDate,
+      monthlyTimelineDates,
+      nextTimelineWindowEndIndex,
+      previousTimelineWindowEndIndex,
+      timelineWindowEndDate
     ]
   );
   const handleTileStatus = useCallback(
@@ -265,34 +545,47 @@ export default function HomePage() {
   );
   const selectSearchResult = useCallback((result: MapTarget) => {
     setSearchTarget(result);
+    setSearchQuery(result.label);
     setSearchStatus("idle");
     setTileStatus({});
   }, []);
-  const updateTimelineMinYear = useCallback((nextYear: number) => {
-    const clampedYear = Math.min(
-      MAX_DYNAMIC_WORLD_YEAR,
-      Math.max(availableMinYear, nextYear)
-    );
-    setTimelineMinYear(clampedYear);
-    setTimelineMaxYear((currentMaxYear) => Math.max(currentMaxYear, clampedYear));
-  }, [availableMinYear]);
-  const updateTimelineMaxYear = useCallback((nextYear: number) => {
-    const clampedYear = Math.min(
-      MAX_DYNAMIC_WORLD_YEAR,
-      Math.max(availableMinYear, nextYear)
-    );
-    setTimelineMaxYear(clampedYear);
-    setTimelineMinYear((currentMinYear) => Math.min(currentMinYear, clampedYear));
-  }, [availableMinYear]);
+  const updateTimelineStartDate = useCallback(
+    (nextDate: string) => {
+      if (!isDateValue(nextDate)) {
+        return;
+      }
+
+      const clampedDate = clampDate(nextDate, oldestTimelineDate, latestTimelineDate);
+      setTimelineStartDate(clampedDate);
+      setTimelineEndDate((currentEndDate) =>
+        currentEndDate && currentEndDate >= clampedDate ? currentEndDate : clampedDate
+      );
+    },
+    [latestTimelineDate, oldestTimelineDate]
+  );
+  const updateTimelineEndDate = useCallback(
+    (nextDate: string) => {
+      if (!isDateValue(nextDate)) {
+        return;
+      }
+
+      const clampedDate = clampDate(nextDate, oldestTimelineDate, latestTimelineDate);
+      setTimelineEndDate(clampedDate);
+      setTimelineStartDate((currentStartDate) =>
+        currentStartDate && currentStartDate <= clampedDate ? currentStartDate : clampedDate
+      );
+    },
+    [latestTimelineDate, oldestTimelineDate]
+  );
   const toggleTimeline = useCallback(
     (enabled: boolean) => {
       setTimelineEnabled(enabled);
 
       if (enabled && hasLatestAvailableDate) {
-        updateSelectedDate(rangeStartDate);
+        updateSelectedDate(cachedTimelineDates[0] ?? cachedRangeStartDate);
       }
     },
-    [hasLatestAvailableDate, rangeStartDate, updateSelectedDate]
+    [cachedRangeStartDate, cachedTimelineDates, hasLatestAvailableDate, updateSelectedDate]
   );
   const handleSearch = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
@@ -330,6 +623,73 @@ export default function HomePage() {
     },
     [searchQuery, selectSearchResult]
   );
+  const requestTimelineCacheStatus = useCallback(
+    async (warmNextDate: boolean) => {
+      if (!dataSourceStatus.configured || !hasLatestAvailableDate) {
+        return undefined;
+      }
+
+      const searchParams = new URLSearchParams({
+        endDate: timelineWindowEndDate,
+        layers: timelineLayerIds.join(","),
+        startDate: timelineWindowStartDate
+      });
+      setTimelineCacheWarming(warmNextDate);
+
+      try {
+        const response = await fetch(`/api/earth-engine/timeline-cache?${searchParams}`, {
+          method: warmNextDate ? "POST" : "GET"
+        });
+        if (!response.ok && response.status !== 202) {
+          throw new Error("Timeline cache status failed.");
+        }
+
+        const payload = (await response.json()) as TimelineCacheStatus;
+        setTimelineCacheStatus(payload);
+        return payload;
+      } catch {
+        return undefined;
+      } finally {
+        setTimelineCacheWarming(false);
+      }
+    },
+    [
+      dataSourceStatus.configured,
+      hasLatestAvailableDate,
+      timelineLayerIds,
+      timelineWindowEndDate,
+      timelineWindowStartDate
+    ]
+  );
+
+  useEffect(() => {
+    const preferences = readPersistedPreferences();
+
+    if (preferences.searchQuery) {
+      setSearchQuery(preferences.searchQuery);
+    }
+    if (preferences.searchTarget) {
+      setSearchTarget(preferences.searchTarget);
+    }
+    if (preferences.timelineStartDate) {
+      setTimelineStartDate(preferences.timelineStartDate);
+    }
+    if (preferences.timelineEndDate) {
+      setTimelineEndDate(preferences.timelineEndDate);
+    }
+    if (preferences.visibleLayers) {
+      setVisibleLayers((currentLayers) => ({
+        ...currentLayers,
+        ...Object.fromEntries(
+          forestLayerConfigs
+            .filter((layer) => typeof preferences.visibleLayers?.[layer.id] === "boolean")
+            .map((layer) => [layer.id, Boolean(preferences.visibleLayers?.[layer.id])])
+        )
+      }));
+    }
+
+    setPreferencesLoaded(true);
+  }, []);
 
   useEffect(() => {
     let ignore = false;
@@ -367,9 +727,6 @@ export default function HomePage() {
 
           setEarliestAvailableDate(earliestDate);
           setLatestAvailableDate(latestDate);
-          setTimelineMinYear((currentMinYear) =>
-            Math.max(currentMinYear, parseDateValue(earliestDate).getUTCFullYear())
-          );
         }
       } catch {
         if (!ignore) {
@@ -393,6 +750,72 @@ export default function HomePage() {
   }, [clearTimelineCommitTimer]);
 
   useEffect(() => {
+    if (!hasLatestAvailableDate || monthlyTimelineDates.length === 0) {
+      return;
+    }
+
+    setTimelineWindowEndIndexPreference((currentEndIndex) => {
+      const currentWindowEndIndex = Math.min(
+        fullTimelineMaxIndex,
+        Math.max(
+          timelineWindowMinEndIndex,
+          currentEndIndex ?? fullTimelineMaxIndex
+        )
+      );
+      const currentWindowStartIndex = Math.max(
+        0,
+        currentWindowEndIndex - TIMELINE_VISIBLE_MONTH_COUNT + 1
+      );
+      let nextWindowEndIndex = currentWindowEndIndex;
+
+      if (selectedDateTimelineIndex < currentWindowStartIndex) {
+        nextWindowEndIndex = Math.min(
+          fullTimelineMaxIndex,
+          Math.max(
+            timelineWindowMinEndIndex,
+            selectedDateTimelineIndex + TIMELINE_VISIBLE_MONTH_COUNT - 1
+          )
+        );
+      } else if (selectedDateTimelineIndex > currentWindowEndIndex) {
+        nextWindowEndIndex = Math.min(
+          fullTimelineMaxIndex,
+          Math.max(timelineWindowMinEndIndex, selectedDateTimelineIndex)
+        );
+      }
+
+      return nextWindowEndIndex === currentEndIndex ? currentEndIndex : nextWindowEndIndex;
+    });
+  }, [
+    fullTimelineMaxIndex,
+    hasLatestAvailableDate,
+    monthlyTimelineDates.length,
+    selectedDateTimelineIndex,
+    timelineWindowMinEndIndex
+  ]);
+
+  useEffect(() => {
+    if (!preferencesLoaded || !hasLatestAvailableDate) {
+      return;
+    }
+
+    writePersistedPreferences({
+      searchQuery,
+      searchTarget,
+      timelineEndDate: rangeEndDate,
+      timelineStartDate: rangeStartDate,
+      visibleLayers
+    });
+  }, [
+    hasLatestAvailableDate,
+    preferencesLoaded,
+    rangeEndDate,
+    rangeStartDate,
+    searchQuery,
+    searchTarget,
+    visibleLayers
+  ]);
+
+  useEffect(() => {
     if (!latestAvailableDate) {
       return;
     }
@@ -407,33 +830,74 @@ export default function HomePage() {
   }, [latestAvailableDate, rangeEndDate, rangeStartDate]);
 
   useEffect(() => {
+    if (!dataSourceStatus.configured || !hasLatestAvailableDate) {
+      return;
+    }
+
+    let ignore = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function tick(warmNextDate: boolean) {
+      const payload = await requestTimelineCacheStatus(warmNextDate);
+      if (ignore) {
+        return;
+      }
+
+      timer = setTimeout(
+        () => tick(!payload?.complete),
+        payload?.complete
+          ? TIMELINE_CACHE_COMPLETE_INTERVAL_MS
+          : TIMELINE_CACHE_ACTIVE_INTERVAL_MS
+      );
+    }
+
+    tick(false);
+
+    return () => {
+      ignore = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [
+    dataSourceStatus.configured,
+    hasLatestAvailableDate,
+    requestTimelineCacheStatus
+  ]);
+
+  useEffect(() => {
     if (!timelineEnabled || !selectedDate) {
       return;
     }
 
-    const clampedDate = clampDate(selectedDate, rangeStartDate, rangeEndDate);
+    const clampedDate = clampDate(selectedDate, cachedRangeStartDate, cachedRangeEndDate);
     if (clampedDate !== selectedDate) {
       updateSelectedDate(clampedDate);
       return;
     }
 
     const stepTimer = setTimeout(() => {
-      if (selectedDate >= rangeEndDate) {
+      const nextTimelineIndex = cachedTimelineDates.findIndex(
+        (timelineDate) => timelineDate > selectedDate
+      );
+
+      if (nextTimelineIndex === -1) {
         if (timelineLoop) {
-          updateSelectedDate(rangeStartDate);
+          updateSelectedDate(cachedTimelineDates[0] ?? cachedRangeStartDate);
         } else {
           setTimelineEnabled(false);
         }
         return;
       }
 
-      updateSelectedDate(addDays(selectedDate, 1));
+      updateSelectedDate(cachedTimelineDates[nextTimelineIndex]);
     }, TIMELINE_STEP_MS);
 
     return () => clearTimeout(stepTimer);
   }, [
-    rangeEndDate,
-    rangeStartDate,
+    cachedRangeEndDate,
+    cachedRangeStartDate,
+    cachedTimelineDates,
     selectedDate,
     timelineEnabled,
     timelineLoop,
@@ -565,13 +1029,13 @@ export default function HomePage() {
                   </span>
                   <small className="statusLine">
                     {tileStatus[layer.id]?.loaded
-                      ? `${tileStatus[layer.id]?.loaded} Earth Engine ${selectedDisplayDate} tiles loaded`
+                      ? `${tileStatus[layer.id]?.loaded} Earth Engine ${activeMapDate} tiles loaded`
                       : !dataSourceStatus.configured
                         ? "Connect Earth Engine"
                         : !selectedDate
                           ? "Reading latest Dynamic World date"
                           : visibleLayers[layer.id]
-                            ? `Queued/rendering Earth Engine ${selectedDisplayDate} tiles`
+                            ? `Queued/rendering Earth Engine ${activeMapDate} tiles`
                             : "Layer off"}
                     {tileStatus[layer.id]?.error ? ` / ${tileStatus[layer.id]?.error} errors` : ""}
                   </small>
@@ -583,55 +1047,80 @@ export default function HomePage() {
           <div className="yearControl">
             <div className="yearHeader">
               <label htmlFor="dateSelect">Date</label>
-              <input
+              <select
                 id="dateSelect"
-                type="date"
                 aria-label="Date"
-                min={rangeStartDate}
-                max={rangeEndDate}
-                value={selectedDisplayDate}
+                value={activeMapDate}
                 disabled={!hasLatestAvailableDate || !selectedDate}
                 onChange={(event) => updateSelectedDate(event.currentTarget.value)}
-              />
+              >
+                {monthlyTimelineDates.map((availableDate, index) => (
+                  <option key={availableDate} value={availableDate}>
+                    {availableDate}
+                    {index === 0 ? " (oldest)" : ""}
+                    {index === fullTimelineMaxIndex ? " (latest)" : ""}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="yearStepper" aria-label="Step Dynamic World date">
               <button
                 type="button"
                 className="yearStepButton"
-                aria-label="Previous Dynamic World day"
+                aria-label="Previous Dynamic World month"
                 disabled={
-                  !hasLatestAvailableDate || !selectedDate || selectedDisplayDate <= rangeStartDate
+                  !hasLatestAvailableDate || !selectedDate || selectedTimelineIndex <= 0
                 }
-                onClick={() => updateSelectedDate(addDays(selectedDisplayDate, -1))}
+                onClick={() =>
+                  updateSelectedDate(
+                    monthlyTimelineDates[selectedTimelineIndex - 1] ?? rangeStartDate
+                  )
+                }
               >
                 -
               </button>
               <output className="yearReadout dateReadout" aria-live="polite">
-                {selectedDate ? selectedDisplayDate : "Loading"}
+                {selectedDate ? activeMapDate : "Loading"}
               </output>
               <button
                 type="button"
                 className="yearStepButton"
-                aria-label="Next Dynamic World day"
+                aria-label="Next Dynamic World month"
                 disabled={
-                  !hasLatestAvailableDate || !selectedDate || selectedDisplayDate >= rangeEndDate
+                  !hasLatestAvailableDate ||
+                  !selectedDate ||
+                  selectedTimelineIndex >= fullTimelineMaxIndex
                 }
-                onClick={() => updateSelectedDate(addDays(selectedDisplayDate, 1))}
+                onClick={() =>
+                  updateSelectedDate(
+                    monthlyTimelineDates[selectedTimelineIndex + 1] ?? rangeEndDate
+                  )
+                }
               >
                 +
               </button>
             </div>
             <p className="hint">
-              Dynamic World V1 30-day mosaic ending on the selected date. Latest available:{" "}
+              Monthly Dynamic World V1 30-day mosaics. Slider selects available data; cache warms
+              the visible 12-month window. Latest available:{" "}
               {latestAvailableDate || "checking Earth Engine"}. Earliest available:{" "}
-              {earliestAvailableDate}. First tiles can take up to 60 seconds.
+              {earliestAvailableDate}.
             </p>
             <div className="timelinePanel">
+              <div className="timelineCacheHeader" aria-live="polite">
+                <span>History cache</span>
+                <strong>
+                  {timelineCacheReadyText}
+                  {timelineCacheComplete ? "" : timelineCacheWarming ? " / warming" : " / checking"}
+                </strong>
+              </div>
               <label className="timelineToggle">
                 <input
                   type="checkbox"
                   checked={timelineEnabled}
-                  disabled={!hasLatestAvailableDate || !selectedDate}
+                  disabled={
+                    !hasLatestAvailableDate || !selectedDate || !hasMultipleCachedTimelineDates
+                  }
                   onChange={(event) => toggleTimeline(event.currentTarget.checked)}
                 />
                 <span>Animate timeline</span>
@@ -646,38 +1135,44 @@ export default function HomePage() {
                 <span>Loop range</span>
               </label>
               <div className="timelineRange">
-                <label htmlFor="timelineMinYear">
-                  <span>Start year</span>
+                <label htmlFor="timelineStartDate">
+                  <span>Start date</span>
                   <select
-                    id="timelineMinYear"
-                    aria-label="Timeline start year"
-                    value={timelineMinYear}
-                    onChange={(event) => updateTimelineMinYear(Number(event.currentTarget.value))}
+                    id="timelineStartDate"
+                    aria-label="Timeline start date"
+                    disabled={!hasLatestAvailableDate}
+                    value={rangeStartDate}
+                    onChange={(event) => updateTimelineStartDate(event.currentTarget.value)}
                   >
-                    {dynamicWorldYearsAsc.map((availableYear) => (
-                      <option key={availableYear} value={availableYear}>
-                        {availableYear}
+                    {availableTimelineDates.map((availableDate, index) => (
+                      <option key={availableDate} value={availableDate}>
+                        {availableDate}
+                        {index === 0 ? " (oldest)" : ""}
+                        {availableDate === latestTimelineDate ? " (latest)" : ""}
                       </option>
                     ))}
                   </select>
                 </label>
-                <label htmlFor="timelineMaxYear">
-                  <span>End year</span>
+                <label htmlFor="timelineEndDate">
+                  <span>End date</span>
                   <select
-                    id="timelineMaxYear"
-                    aria-label="Timeline end year"
-                    value={timelineMaxYear}
-                    onChange={(event) => updateTimelineMaxYear(Number(event.currentTarget.value))}
+                    id="timelineEndDate"
+                    aria-label="Timeline end date"
+                    disabled={!hasLatestAvailableDate}
+                    value={rangeEndDate}
+                    onChange={(event) => updateTimelineEndDate(event.currentTarget.value)}
                   >
-                    {dynamicWorldYearsAsc.map((availableYear) => (
-                      <option key={availableYear} value={availableYear}>
-                        {availableYear}
+                    {availableTimelineDates.map((availableDate, index) => (
+                      <option key={availableDate} value={availableDate}>
+                        {availableDate}
+                        {index === 0 ? " (oldest)" : ""}
+                        {availableDate === latestTimelineDate ? " (latest)" : ""}
                       </option>
                     ))}
                   </select>
                 </label>
               </div>
-              <p className="hint">Plays oldest to newest at 5 seconds per day.</p>
+              <p className="hint">Plays oldest to newest at 5 seconds per month.</p>
             </div>
           </div>
         </aside>
@@ -686,36 +1181,69 @@ export default function HomePage() {
           <DynamicMap
             visibleLayers={renderedLayers}
             target={searchTarget}
-            date={selectedDisplayDate || earliestAvailableDate}
-            preloadMaxDate={rangeEndDate}
-            preloadMinDate={rangeStartDate}
+            date={activeMapDate || earliestAvailableDate}
+            preloadMaxDate={timelineWindowEndDate}
+            preloadMinDate={timelineWindowStartDate}
             onTileStatus={handleTileStatus}
           />
           <div className="dayTimeline">
             <div className="dayTimelineHeader">
-              <span>{rangeStartDate}</span>
+              <span>{timelineWindowStartDate}</span>
               <strong>{selectedDate ? timelineDisplayDate : "Loading latest date"}</strong>
-              <span>{rangeEndDate}</span>
+              <span>{timelineWindowEndDate}</span>
+            </div>
+            <p className="dayTimelineCache" aria-live="polite">
+              {timelineCacheReadyText}
+              {` / ${timelineActiveStatusText}`}
+            </p>
+            <div className="dayTimelineWindow">
+              <button
+                type="button"
+                disabled={!canJumpTimelineBackYear}
+                onClick={() => shiftTimelineWindowByYear(-1)}
+              >
+                &lt; 1Y
+              </button>
+              <span>12 mo window</span>
+              <button
+                type="button"
+                disabled={!canJumpTimelineForwardYear}
+                onClick={() => shiftTimelineWindowByYear(1)}
+              >
+                1Y &gt;
+              </button>
             </div>
             <input
+              className={timelineCacheComplete ? "ready" : "warming"}
               type="range"
-              min={0}
-              max={timelineDayCount}
+              min={timelineWindowStartIndex}
+              max={effectiveTimelineWindowEndIndex}
               step={1}
+              style={timelineSliderStyle}
               value={timelineDisplayDateIndex}
-              disabled={!hasLatestAvailableDate || !selectedDate}
-              aria-label="Daily Dynamic World timeline"
+              disabled={
+                !hasLatestAvailableDate || !selectedDate || !hasMultipleSelectableTimelineDates
+              }
+              aria-label="Monthly Dynamic World timeline"
               onChange={(event) =>
-                previewTimelineDate(addDays(rangeStartDate, Number(event.currentTarget.value)))
+                previewTimelineDate(
+                  monthlyTimelineDates[Number(event.currentTarget.value)] ?? timelineWindowEndDate
+                )
               }
               onBlur={(event) =>
-                commitTimelineDate(addDays(rangeStartDate, Number(event.currentTarget.value)))
+                commitTimelineDate(
+                  monthlyTimelineDates[Number(event.currentTarget.value)] ?? timelineWindowEndDate
+                )
               }
               onKeyUp={(event) =>
-                commitTimelineDate(addDays(rangeStartDate, Number(event.currentTarget.value)))
+                commitTimelineDate(
+                  monthlyTimelineDates[Number(event.currentTarget.value)] ?? timelineWindowEndDate
+                )
               }
               onPointerUp={(event) =>
-                commitTimelineDate(addDays(rangeStartDate, Number(event.currentTarget.value)))
+                commitTimelineDate(
+                  monthlyTimelineDates[Number(event.currentTarget.value)] ?? timelineWindowEndDate
+                )
               }
             />
           </div>

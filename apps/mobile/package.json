@@ -1,6 +1,6 @@
 {
   "name": "forest-mobile",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "main": "index.js",
   "scripts": {
@@ -14,9 +14,10 @@
     "web": "expo start --web"
   },
   "dependencies": {
-    "@forest/shared": "0.1.0",
+    "@forest/shared": "1.0.0",
     "@react-native-community/slider": "^4.5.2",
     "expo": "~51.0.21",
+    "expo-file-system": "~17.0.1",
     "expo-status-bar": "~1.12.1",
     "react": "18.2.0",
     "react-native": "0.74.3",

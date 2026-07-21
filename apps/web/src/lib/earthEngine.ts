@@ -3,6 +3,8 @@ import { GoogleAuth } from "google-auth-library";
 import { type ForestLayerId } from "@forest/shared";
 import {
   getTileCacheStatus,
+  markTimelineDateLayerCached,
+  readTimelineDateLayerCache,
   readTileCache,
   type TileCacheEntry,
   writeTileCache
@@ -56,6 +58,7 @@ const TRANSPARENT_PNG_BASE64 =
 const mapIdCache = new Map<string, Promise<EarthEngineMapId | null>>();
 const dynamicWorldTileInflight = new Map<string, Promise<AuthenticatedTile>>();
 const googleAuth = new GoogleAuth({
+  projectId: process.env.EE_PROJECT || process.env.GOOGLE_CLOUD_PROJECT,
   scopes: EARTH_ENGINE_SCOPES
 });
 let initializationPromise: Promise<void> | null = null;
@@ -582,6 +585,30 @@ async function getMapId({
   return mapIdPromise;
 }
 
+export async function warmDynamicWorldTimelineDate({
+  date,
+  layerId
+}: {
+  date: string;
+  layerId: ForestLayerId;
+}) {
+  const tile = await getDynamicWorldTile({
+    date,
+    layerId,
+    x: 3,
+    y: 6,
+    z: 4
+  });
+
+  return {
+    cacheStatus: tile.cacheStatus,
+    contentType: tile.contentType,
+    date,
+    layerId,
+    status: tile.status
+  };
+}
+
 async function fetchEarthEngineTile(tileUrl: string, headers: Record<string, string>) {
   const abortController = new AbortController();
   const timeout = setTimeout(() => abortController.abort(), EARTH_ENGINE_TIMEOUT_MS);
@@ -638,10 +665,6 @@ export async function getDynamicWorldTile({
   assertValidRequest(layerId, date);
 
   const typedLayerId = layerId as ForestLayerId;
-  const mapId = await getMapId({
-    date,
-    layerId: typedLayerId
-  });
   const cacheKey = getDynamicWorldTileCacheKey({
     date,
     layerId: typedLayerId,
@@ -650,14 +673,27 @@ export async function getDynamicWorldTile({
     z
   });
 
-  if (!mapId) {
-    return getCachedDynamicWorldTile(cacheKey, () => Promise.resolve(transparentPngTile()));
+  const tile = await getCachedDynamicWorldTile(cacheKey, async () => {
+    const mapId = await getMapId({
+      date,
+      layerId: typedLayerId
+    });
+
+    if (!mapId) {
+      return transparentPngTile();
+    }
+
+    const tileUrl = ee.data.getTileUrl(mapId, x, y, z) as string;
+    const headers = await getAdcRequestHeaders(tileUrl);
+
+    return fetchEarthEngineTile(tileUrl, headers);
+  });
+
+  if (tile.status === 200 && !tile.contentType.includes("application/json")) {
+    await markTimelineDateLayerCached(date, typedLayerId);
   }
 
-  const tileUrl = ee.data.getTileUrl(mapId, x, y, z) as string;
-  const headers = await getAdcRequestHeaders(tileUrl);
-
-  return getCachedDynamicWorldTile(cacheKey, () => fetchEarthEngineTile(tileUrl, headers));
+  return tile;
 }
 
 export const dynamicWorldMetadata = {
@@ -672,4 +708,8 @@ export const dynamicWorldMetadata = {
 
 export function getDynamicWorldTileCacheStatus() {
   return getTileCacheStatus();
+}
+
+export async function getDynamicWorldTimelineDateLayerCache(dates: string[]) {
+  return readTimelineDateLayerCache(dates);
 }

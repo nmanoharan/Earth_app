@@ -24,13 +24,25 @@ type SerializedTile = {
   contentType: string;
   status: number;
 };
+type SerializedTimelineDate = {
+  layers: string[];
+  updatedAt: string;
+};
+type TimelineDateMarker = {
+  expiresAt: number;
+  layers: Set<string>;
+  updatedAt: string;
+};
 
 const DEFAULT_TILE_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7;
 const DEFAULT_MEMORY_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const DEFAULT_MEMORY_CACHE_MAX_ENTRIES = 240;
 const TILE_CACHE_KEY_PREFIX = process.env.TILE_CACHE_KEY_PREFIX || "forest:dynamic-world:tile:";
+const TIMELINE_DATE_CACHE_KEY_PREFIX =
+  process.env.TIMELINE_DATE_CACHE_KEY_PREFIX || "forest:dynamic-world:timeline-date:";
 
 const memoryCache = new Map<string, MemoryTile>();
+const memoryTimelineDateCache = new Map<string, TimelineDateMarker>();
 let memoryCacheBytes = 0;
 let redisClientPromise: Promise<RedisClient | null> | null = null;
 
@@ -85,6 +97,10 @@ function cacheKey(key: string) {
   return `${TILE_CACHE_KEY_PREFIX}${key}`;
 }
 
+function timelineDateCacheKey(date: string) {
+  return `${TIMELINE_DATE_CACHE_KEY_PREFIX}${date}`;
+}
+
 function cloneEntry(entry: TileCacheEntry): TileCacheEntry {
   return {
     bytes: entry.bytes.slice(),
@@ -99,6 +115,29 @@ function serializeEntry(entry: TileCacheEntry): string {
     contentType: entry.contentType,
     status: entry.status
   } satisfies SerializedTile);
+}
+
+function serializeTimelineDate(entry: TimelineDateMarker): string {
+  return JSON.stringify({
+    layers: [...entry.layers].sort(),
+    updatedAt: entry.updatedAt
+  } satisfies SerializedTimelineDate);
+}
+
+function deserializeTimelineDate(value: string): SerializedTimelineDate | null {
+  try {
+    const parsed = JSON.parse(value) as Partial<SerializedTimelineDate>;
+    if (!Array.isArray(parsed.layers) || typeof parsed.updatedAt !== "string") {
+      return null;
+    }
+
+    return {
+      layers: parsed.layers.filter((layer) => typeof layer === "string"),
+      updatedAt: parsed.updatedAt
+    };
+  } catch {
+    return null;
+  }
 }
 
 function deserializeEntry(value: string): TileCacheEntry | null {
@@ -118,6 +157,15 @@ function deserializeEntry(value: string): TileCacheEntry | null {
   }
 }
 
+function trimMemoryTimelineDateCache() {
+  const now = Date.now();
+  memoryTimelineDateCache.forEach((entry, date) => {
+    if (entry.expiresAt <= now) {
+      memoryTimelineDateCache.delete(date);
+    }
+  });
+}
+
 function trimMemoryCache() {
   while (memoryCache.size > getMemoryMaxEntries() || memoryCacheBytes > getMemoryMaxBytes()) {
     const oldestKey = memoryCache.keys().next().value as string | undefined;
@@ -132,6 +180,31 @@ function trimMemoryCache() {
       memoryCacheBytes -= oldestTile.size;
     }
   }
+}
+
+function readMemoryTimelineDateCache(dates: string[]) {
+  trimMemoryTimelineDateCache();
+
+  return Object.fromEntries(
+    dates.map((date) => [
+      date,
+      [...(memoryTimelineDateCache.get(date)?.layers ?? new Set<string>())]
+    ])
+  );
+}
+
+function writeMemoryTimelineDateCache(date: string, layerId: string) {
+  trimMemoryTimelineDateCache();
+
+  const existingEntry = memoryTimelineDateCache.get(date);
+  const layers = existingEntry?.layers ?? new Set<string>();
+  layers.add(layerId);
+
+  memoryTimelineDateCache.set(date, {
+    expiresAt: Date.now() + getCacheTtlSeconds() * 1000,
+    layers,
+    updatedAt: new Date().toISOString()
+  });
 }
 
 function readMemoryCache(key: string) {
@@ -254,6 +327,82 @@ export async function writeTileCache(key: string, entry: TileCacheEntry) {
   await client.setEx(cacheKey(key), getCacheTtlSeconds(), serializeEntry(entry)).catch((error) => {
     console.warn("Redis tile cache write failed:", error instanceof Error ? error.message : error);
   });
+}
+
+export async function markTimelineDateLayerCached(date: string, layerId: string) {
+  const backend = getCacheBackend();
+  if (backend === "none") {
+    return;
+  }
+
+  if (backend === "memory") {
+    writeMemoryTimelineDateCache(date, layerId);
+    return;
+  }
+
+  const client = await getRedisClient();
+  if (!client) {
+    return;
+  }
+
+  const cacheKeyForDate = timelineDateCacheKey(date);
+  const existingValue = await client.get(cacheKeyForDate).catch((error) => {
+    console.warn(
+      "Redis timeline cache read failed:",
+      error instanceof Error ? error.message : error
+    );
+    return null;
+  });
+  const existingLayers = existingValue
+    ? deserializeTimelineDate(existingValue)?.layers ?? []
+    : [];
+  const marker: TimelineDateMarker = {
+    expiresAt: Date.now() + getCacheTtlSeconds() * 1000,
+    layers: new Set([...existingLayers, layerId]),
+    updatedAt: new Date().toISOString()
+  };
+
+  await client
+    .setEx(cacheKeyForDate, getCacheTtlSeconds(), serializeTimelineDate(marker))
+    .catch((error) => {
+      console.warn(
+        "Redis timeline cache write failed:",
+        error instanceof Error ? error.message : error
+      );
+    });
+}
+
+export async function readTimelineDateLayerCache(dates: string[]) {
+  const backend = getCacheBackend();
+  const emptyResult = Object.fromEntries(dates.map((date) => [date, [] as string[]]));
+
+  if (backend === "none" || dates.length === 0) {
+    return emptyResult;
+  }
+
+  if (backend === "memory") {
+    return readMemoryTimelineDateCache(dates);
+  }
+
+  const client = await getRedisClient();
+  if (!client) {
+    return emptyResult;
+  }
+
+  const entries = await Promise.all(
+    dates.map(async (date) => {
+      const value = await client.get(timelineDateCacheKey(date)).catch((error) => {
+        console.warn(
+          "Redis timeline cache read failed:",
+          error instanceof Error ? error.message : error
+        );
+        return null;
+      });
+      return [date, value ? deserializeTimelineDate(value)?.layers ?? [] : []] as const;
+    })
+  );
+
+  return Object.fromEntries(entries);
 }
 
 export function getTileCacheStatus() {

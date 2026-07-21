@@ -1,7 +1,10 @@
 import { StatusBar } from "expo-status-bar";
+import Slider from "@react-native-community/slider";
+import * as FileSystem from "expo-file-system";
 import { type ComponentRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Keyboard,
   Pressable,
   SafeAreaView,
@@ -30,6 +33,25 @@ type SearchResult = {
 };
 type SearchStatus = "idle" | "loading" | "empty" | "error";
 type TileLoadStatus = "idle" | "loading" | "loaded";
+type TimelineCacheStatus = {
+  complete: boolean;
+  enabledDates: string[];
+  progress: number;
+  readyCount: number;
+  readyDates: string[];
+  totalCount: number;
+  warmed?: {
+    date: string;
+    layerId: ForestLayerId;
+    status: number;
+  };
+};
+type PersistedMobilePreferences = {
+  searchQuery?: string;
+  selectedDate?: string;
+  searchTarget?: SearchResult;
+  visibleLayers?: Partial<Record<ForestLayerId, boolean>>;
+};
 
 const DEFAULT_TILE_API_BASE_URL = "http://127.0.0.1:3001";
 const TILE_API_BASE_URL =
@@ -39,10 +61,17 @@ const MIN_DYNAMIC_WORLD_DATE = "2015-07-15";
 const MIN_MAP_ZOOM = 3;
 const MAX_EARTH_ENGINE_NATIVE_ZOOM = 14;
 const MAX_MAP_ZOOM = 20;
+const TIMELINE_VISIBLE_MONTH_COUNT = 12;
+const TIMELINE_YEAR_STEP_MONTHS = 12;
+const TIMELINE_CACHE_ACTIVE_INTERVAL_MS = 300;
+const TIMELINE_CACHE_COMPLETE_INTERVAL_MS = 15_000;
+const MOBILE_PREFERENCES_PATH = FileSystem.documentDirectory
+  ? `${FileSystem.documentDirectory}oeoc-earth-preferences-v1.json`
+  : "";
 const initialLayers = forestLayerConfigs.reduce(
   (layers, layer) => ({
     ...layers,
-    [layer.id]: layer.visibleByDefault
+    [layer.id]: layer.id === "treeCover" || layer.id === "forestLoss"
   }),
   {} as Record<ForestLayerId, boolean>
 );
@@ -68,10 +97,14 @@ function formatDateValue(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
-function addDays(value: string, days: number) {
-  const date = parseDateValue(value);
-  date.setUTCDate(date.getUTCDate() + days);
-  return formatDateValue(date);
+function isSameUtcMonth(firstDate: string, secondDate: string) {
+  const first = parseDateValue(firstDate);
+  const second = parseDateValue(secondDate);
+
+  return (
+    first.getUTCFullYear() === second.getUTCFullYear() &&
+    first.getUTCMonth() === second.getUTCMonth()
+  );
 }
 
 function clampDate(value: string, minValue: string, maxValue: string) {
@@ -86,20 +119,134 @@ function clampDate(value: string, minValue: string, maxValue: string) {
   return value;
 }
 
-function buildTileUrl(layerId: ForestLayerId, date: string, refreshKey: number) {
+function pushMonthlyDate(dates: string[], nextDate: string) {
+  const previousDate = dates.at(-1);
+
+  if (!previousDate) {
+    dates.push(nextDate);
+    return;
+  }
+
+  if (previousDate === nextDate) {
+    return;
+  }
+
+  if (isSameUtcMonth(previousDate, nextDate)) {
+    dates[dates.length - 1] = nextDate;
+    return;
+  }
+
+  dates.push(nextDate);
+}
+
+function buildMonthlyTimelineDates(startDate: string, endDate: string) {
+  if (!isDateValue(startDate) || !isDateValue(endDate) || endDate < startDate) {
+    return [];
+  }
+
+  const dates: string[] = [];
+  const start = parseDateValue(startDate);
+  const end = parseDateValue(endDate);
+  const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+
+  while (cursor <= end) {
+    const monthEndDate = formatDateValue(
+      new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0))
+    );
+
+    pushMonthlyDate(dates, clampDate(monthEndDate, startDate, endDate));
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+
+  pushMonthlyDate(dates, endDate);
+
+  return dates;
+}
+
+function nearestDateIndex(dates: string[], targetDate: string) {
+  if (dates.length === 0 || !isDateValue(targetDate)) {
+    return 0;
+  }
+
+  const targetTime = parseDateValue(targetDate).getTime();
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  dates.forEach((date, index) => {
+    const distance = Math.abs(parseDateValue(date).getTime() - targetTime);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  });
+
+  return bestIndex;
+}
+
+function isSearchResult(value: unknown): value is SearchResult {
+  const result = value as Partial<SearchResult>;
+
+  return (
+    typeof result?.id === "string" &&
+    typeof result.label === "string" &&
+    typeof result.lat === "number" &&
+    typeof result.lng === "number" &&
+    typeof result.zoom === "number" &&
+    (result.type === "state" || result.type === "city")
+  );
+}
+
+async function readPersistedMobilePreferences() {
+  if (!MOBILE_PREFERENCES_PATH) {
+    return {};
+  }
+
+  try {
+    const rawPreferences = await FileSystem.readAsStringAsync(MOBILE_PREFERENCES_PATH);
+    const parsed = JSON.parse(rawPreferences) as PersistedMobilePreferences;
+
+    return {
+      searchQuery: typeof parsed.searchQuery === "string" ? parsed.searchQuery : undefined,
+      searchTarget: isSearchResult(parsed.searchTarget) ? parsed.searchTarget : undefined,
+      selectedDate: isDateValue(parsed.selectedDate) ? parsed.selectedDate : undefined,
+      visibleLayers: parsed.visibleLayers
+    } satisfies PersistedMobilePreferences;
+  } catch {
+    return {};
+  }
+}
+
+async function writePersistedMobilePreferences(preferences: PersistedMobilePreferences) {
+  if (!MOBILE_PREFERENCES_PATH) {
+    return;
+  }
+
+  try {
+    await FileSystem.writeAsStringAsync(MOBILE_PREFERENCES_PATH, JSON.stringify(preferences));
+  } catch {
+    // Preference persistence should never block the map.
+  }
+}
+
+function buildTileUrl(layerId: ForestLayerId, date: string) {
   const params = [
     `date=${encodeURIComponent(date)}`,
     `layerId=${encodeURIComponent(layerId)}`,
     "x={x}",
     "y={y}",
     "z={z}",
-    `refresh=${refreshKey}`,
     MOBILE_API_TOKEN ? `mobileToken=${encodeURIComponent(MOBILE_API_TOKEN)}` : ""
   ]
     .filter(Boolean)
     .join("&");
 
   return `${TILE_API_BASE_URL}/api/earth-engine/tiles?${params}`;
+}
+
+function buildTileCachePath(layerId: ForestLayerId, date: string) {
+  return FileSystem.cacheDirectory
+    ? `${FileSystem.cacheDirectory}earth-tiles/v1/${layerId}/${date}`
+    : undefined;
 }
 
 function appendMobileApiToken(url: string) {
@@ -130,10 +277,16 @@ function zoomFromRegion(region: Region) {
 export default function App() {
   const mapRef = useRef<ComponentRef<typeof MapView> | null>(null);
   const lastTileZoomLevelRef = useRef(zoomFromRegion(defaultRegion));
+  const timelineCachePulseRef = useRef(new Animated.Value(0.55));
+  const timelineCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedDate, setSelectedDate] = useState("");
+  const [timelinePreviewDate, setTimelinePreviewDate] = useState("");
   const [earliestDate, setEarliestDate] = useState(MIN_DYNAMIC_WORLD_DATE);
   const [latestDate, setLatestDate] = useState("");
+  const [persistedSelectedDate, setPersistedSelectedDate] = useState("");
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchTarget, setSearchTarget] = useState<SearchResult>();
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchStatus, setSearchStatus] = useState<SearchStatus>("idle");
   const [status, setStatus] = useState<EarthEngineStatus>({
@@ -142,9 +295,12 @@ export default function App() {
   });
   const [controlsExpanded, setControlsExpanded] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(true);
+  const [timelineCacheStatus, setTimelineCacheStatus] = useState<TimelineCacheStatus>();
+  const [timelineCacheWarming, setTimelineCacheWarming] = useState(false);
+  const [timelineWindowEndIndexPreference, setTimelineWindowEndIndexPreference] =
+    useState<number>();
   const [tileLoadStatus, setTileLoadStatus] = useState<TileLoadStatus>("idle");
   const [tileZoomLevel, setTileZoomLevel] = useState(zoomFromRegion(defaultRegion));
-  const [tileRefreshKey, setTileRefreshKey] = useState(0);
   const [visibleLayers, setVisibleLayers] =
     useState<Record<ForestLayerId, boolean>>(initialLayers);
 
@@ -152,8 +308,117 @@ export default function App() {
     () => Object.values(visibleLayers).filter(Boolean).length,
     [visibleLayers]
   );
-  const canStepBack = Boolean(selectedDate && selectedDate > earliestDate);
-  const canStepForward = Boolean(selectedDate && latestDate && selectedDate < latestDate);
+  const hasDateRange = Boolean(latestDate);
+  const requestedTileDate = timelinePreviewDate || selectedDate || latestDate;
+  const monthlyTimelineDates = useMemo(
+    () => (latestDate ? buildMonthlyTimelineDates(earliestDate, latestDate) : []),
+    [earliestDate, latestDate]
+  );
+  const fullTimelineMaxIndex = Math.max(0, monthlyTimelineDates.length - 1);
+  const timelineLayerIds = useMemo(() => {
+    const selectedLayerIds = forestLayerConfigs
+      .filter((layer) => visibleLayers[layer.id])
+      .map((layer) => layer.id);
+
+    return selectedLayerIds.length > 0 ? selectedLayerIds : (["treeCover"] as ForestLayerId[]);
+  }, [visibleLayers]);
+  const selectedDateTimelineIndex = useMemo(
+    () => nearestDateIndex(monthlyTimelineDates, selectedDate || latestDate),
+    [latestDate, monthlyTimelineDates, selectedDate]
+  );
+  const timelineWindowMinEndIndex = Math.min(
+    fullTimelineMaxIndex,
+    Math.max(0, TIMELINE_VISIBLE_MONTH_COUNT - 1)
+  );
+  const effectiveTimelineWindowEndIndex = Math.min(
+    fullTimelineMaxIndex,
+    Math.max(
+      timelineWindowMinEndIndex,
+      timelineWindowEndIndexPreference ?? fullTimelineMaxIndex
+    )
+  );
+  const timelineWindowStartIndex = Math.max(
+    0,
+    effectiveTimelineWindowEndIndex - TIMELINE_VISIBLE_MONTH_COUNT + 1
+  );
+  const timelineWindowStartDate = monthlyTimelineDates[timelineWindowStartIndex] ?? earliestDate;
+  const timelineWindowEndDate =
+    monthlyTimelineDates[effectiveTimelineWindowEndIndex] ?? latestDate;
+  const cachedTimelineDates = useMemo(() => {
+    const enabledDateSet = new Set(timelineCacheStatus?.enabledDates ?? []);
+    const enabledDates = monthlyTimelineDates.filter(
+      (date) =>
+        date >= timelineWindowStartDate &&
+        date <= timelineWindowEndDate &&
+        enabledDateSet.has(date)
+    );
+
+    if (enabledDates.length > 0) {
+      return enabledDates;
+    }
+
+    return timelineWindowEndDate ? [timelineWindowEndDate] : [];
+  }, [monthlyTimelineDates, timelineCacheStatus, timelineWindowEndDate, timelineWindowStartDate]);
+  const cachedRangeStartDate = cachedTimelineDates[0] ?? timelineWindowEndDate;
+  const cachedRangeEndDate = cachedTimelineDates.at(-1) ?? timelineWindowEndDate;
+  const activeTileDate =
+    requestedTileDate && latestDate ? clampDate(requestedTileDate, earliestDate, latestDate) : "";
+  const timelineDisplayDate = activeTileDate;
+  const rawTimelineDisplayIndex = useMemo(
+    () => nearestDateIndex(monthlyTimelineDates, timelineDisplayDate),
+    [monthlyTimelineDates, timelineDisplayDate]
+  );
+  const timelineDisplayIndex = useMemo(
+    () =>
+      Math.max(
+        timelineWindowStartIndex,
+        Math.min(effectiveTimelineWindowEndIndex, rawTimelineDisplayIndex)
+      ),
+    [
+      effectiveTimelineWindowEndIndex,
+      rawTimelineDisplayIndex,
+      timelineWindowStartIndex
+    ]
+  );
+  const selectedTimelineIndex = useMemo(
+    () => nearestDateIndex(monthlyTimelineDates, activeTileDate),
+    [activeTileDate, monthlyTimelineDates]
+  );
+  const cachedTimelineStartIndex = useMemo(
+    () => nearestDateIndex(monthlyTimelineDates, cachedRangeStartDate),
+    [cachedRangeStartDate, monthlyTimelineDates]
+  );
+  const timelineReadyStartIndex = Math.min(
+    effectiveTimelineWindowEndIndex,
+    Math.max(cachedTimelineStartIndex, timelineWindowStartIndex)
+  );
+  const timelineWindowSpan = Math.max(
+    1,
+    effectiveTimelineWindowEndIndex - timelineWindowStartIndex
+  );
+  const cacheReadyStartPercent =
+    ((timelineReadyStartIndex - timelineWindowStartIndex) / timelineWindowSpan) * 100;
+  const canStepBack = Boolean(selectedDate && selectedTimelineIndex > 0);
+  const canStepForward = Boolean(
+    selectedDate && selectedTimelineIndex < fullTimelineMaxIndex
+  );
+  const hasMultipleSelectableTimelineDates = Boolean(
+    hasDateRange && timelineWindowStartIndex < effectiveTimelineWindowEndIndex
+  );
+  const previousTimelineWindowEndIndex =
+    effectiveTimelineWindowEndIndex - TIMELINE_YEAR_STEP_MONTHS;
+  const nextTimelineWindowEndIndex =
+    effectiveTimelineWindowEndIndex + TIMELINE_YEAR_STEP_MONTHS;
+  const canJumpTimelineBackYear = Boolean(
+    hasDateRange && previousTimelineWindowEndIndex >= timelineWindowMinEndIndex
+  );
+  const canJumpTimelineForwardYear = Boolean(
+    hasDateRange && nextTimelineWindowEndIndex <= fullTimelineMaxIndex
+  );
+  const timelineCacheComplete = Boolean(timelineCacheStatus?.complete);
+  const timelineCacheReadyText = timelineCacheStatus
+    ? `${timelineCacheStatus.readyCount}/${timelineCacheStatus.totalCount} months ready`
+    : "Checking cached months";
   const activeLayerLabels = useMemo(
     () =>
       forestLayerConfigs
@@ -162,7 +427,18 @@ export default function App() {
     [visibleLayers]
   );
   const activeLayerKey = activeLayerLabels.join("|");
-  const selectedDisplayDate = selectedDate || "latest date";
+  const selectedDisplayDate = activeTileDate || "latest date";
+  const activeTimelineDateReady = Boolean(
+    activeTileDate &&
+      (timelineCacheStatus?.readyDates.includes(activeTileDate) ||
+        timelineCacheStatus?.enabledDates.includes(activeTileDate) ||
+        tileLoadStatus === "loaded")
+  );
+  const timelineActiveStatusText = activeTimelineDateReady
+    ? "ready"
+    : timelineCacheWarming
+      ? "warming"
+      : "checking";
   const tileProgressText =
     activeLayerLabels.length === 0
       ? "Tiles: no layers selected"
@@ -178,9 +454,107 @@ export default function App() {
         return;
       }
 
-      setSelectedDate(clampDate(nextDate, earliestDate, latestDate));
+      const clampedDate = clampDate(nextDate, earliestDate, latestDate);
+      setTimelinePreviewDate("");
+      setSelectedDate(
+        monthlyTimelineDates[nearestDateIndex(monthlyTimelineDates, clampedDate)] ?? latestDate
+      );
     },
-    [earliestDate, latestDate]
+    [earliestDate, latestDate, monthlyTimelineDates]
+  );
+  const clearTimelineCommitTimer = useCallback(() => {
+    if (timelineCommitTimerRef.current) {
+      clearTimeout(timelineCommitTimerRef.current);
+      timelineCommitTimerRef.current = null;
+    }
+  }, []);
+  const dateForTimelineIndex = useCallback(
+    (timelineIndex: number) => {
+      const nextIndex = Math.max(
+        timelineWindowStartIndex,
+        Math.min(effectiveTimelineWindowEndIndex, Math.round(timelineIndex))
+      );
+      return monthlyTimelineDates[nextIndex] ?? timelineWindowEndDate;
+    },
+    [
+      effectiveTimelineWindowEndIndex,
+      monthlyTimelineDates,
+      timelineWindowEndDate,
+      timelineWindowStartIndex
+    ]
+  );
+  const previewTimelineDate = useCallback(
+    (timelineIndex: number) => {
+      if (!hasDateRange) {
+        return;
+      }
+
+      const clampedDate = clampDate(dateForTimelineIndex(timelineIndex), earliestDate, latestDate);
+      setTimelinePreviewDate(clampedDate);
+      clearTimelineCommitTimer();
+      timelineCommitTimerRef.current = setTimeout(() => {
+        updateDate(clampedDate);
+      }, 450);
+    },
+    [
+      clearTimelineCommitTimer,
+      dateForTimelineIndex,
+      earliestDate,
+      hasDateRange,
+      latestDate,
+      updateDate
+    ]
+  );
+  const shiftTimelineWindowByYear = useCallback(
+    (direction: -1 | 1) => {
+      if (!hasDateRange || monthlyTimelineDates.length === 0) {
+        return;
+      }
+
+      const nextWindowEndIndex =
+        direction < 0 ? previousTimelineWindowEndIndex : nextTimelineWindowEndIndex;
+
+      if (
+        (direction < 0 && !canJumpTimelineBackYear) ||
+        (direction > 0 && !canJumpTimelineForwardYear)
+      ) {
+        return;
+      }
+
+      setTimelineWindowEndIndexPreference(nextWindowEndIndex);
+      setTimelineCacheStatus(undefined);
+      setTimelinePreviewDate("");
+      setTileLoadStatus("idle");
+      setSelectedDate(monthlyTimelineDates[nextWindowEndIndex] ?? timelineWindowEndDate);
+    },
+    [
+      canJumpTimelineBackYear,
+      canJumpTimelineForwardYear,
+      hasDateRange,
+      monthlyTimelineDates,
+      nextTimelineWindowEndIndex,
+      previousTimelineWindowEndIndex,
+      timelineWindowEndDate
+    ]
+  );
+  const commitTimelineDate = useCallback(
+    (timelineIndex: number) => {
+      if (!hasDateRange) {
+        return;
+      }
+
+      const nextDate = dateForTimelineIndex(timelineIndex);
+      clearTimelineCommitTimer();
+      updateDate(clampDate(nextDate, earliestDate, latestDate));
+    },
+    [
+      clearTimelineCommitTimer,
+      dateForTimelineIndex,
+      earliestDate,
+      hasDateRange,
+      latestDate,
+      updateDate
+    ]
   );
   const refreshTilesForRegion = useCallback((region: Region) => {
     const nextZoomLevel = zoomFromRegion(region);
@@ -190,7 +564,6 @@ export default function App() {
 
     lastTileZoomLevelRef.current = nextZoomLevel;
     setTileZoomLevel(nextZoomLevel);
-    setTileRefreshKey((currentKey) => currentKey + 1);
   }, []);
   const handleRegionChangeComplete = useCallback(
     (region: Region) => {
@@ -201,9 +574,9 @@ export default function App() {
   const selectSearchResult = useCallback((result: SearchResult) => {
     setSearchStatus("idle");
     setSearchResults([]);
+    setSearchTarget(result);
     setSearchQuery(result.label);
     Keyboard.dismiss();
-    mapRef.current?.animateToRegion(regionForTarget(result), 900);
   }, []);
   const handleSearch = useCallback(async () => {
     const query = searchQuery.trim();
@@ -242,8 +615,86 @@ export default function App() {
       setSearchStatus("error");
     }
   }, [searchQuery, selectSearchResult]);
+  const requestTimelineCacheStatus = useCallback(
+    async (warmNextDate: boolean) => {
+      if (!status.configured || !latestDate) {
+        return undefined;
+      }
+
+      const searchParams = new URLSearchParams({
+        endDate: timelineWindowEndDate,
+        layers: timelineLayerIds.join(","),
+        startDate: timelineWindowStartDate
+      });
+      setTimelineCacheWarming(warmNextDate);
+
+      try {
+        const response = await fetch(
+          appendMobileApiToken(`${TILE_API_BASE_URL}/api/earth-engine/timeline-cache?${searchParams}`),
+          {
+            method: warmNextDate ? "POST" : "GET"
+          }
+        );
+        if (!response.ok && response.status !== 202) {
+          throw new Error(`Timeline cache request failed with ${response.status}.`);
+        }
+
+        const payload = (await response.json()) as TimelineCacheStatus;
+        setTimelineCacheStatus(payload);
+        return payload;
+      } catch {
+        return undefined;
+      } finally {
+        setTimelineCacheWarming(false);
+      }
+    },
+    [latestDate, status.configured, timelineLayerIds, timelineWindowEndDate, timelineWindowStartDate]
+  );
 
   useEffect(() => {
+    let ignore = false;
+
+    async function loadPreferences() {
+      const preferences = await readPersistedMobilePreferences();
+      if (ignore) {
+        return;
+      }
+
+      if (preferences.searchQuery) {
+        setSearchQuery(preferences.searchQuery);
+      }
+      if (preferences.searchTarget) {
+        setSearchTarget(preferences.searchTarget);
+      }
+      if (preferences.selectedDate) {
+        setPersistedSelectedDate(preferences.selectedDate);
+      }
+      if (preferences.visibleLayers) {
+        setVisibleLayers((currentLayers) => ({
+          ...currentLayers,
+          ...Object.fromEntries(
+            forestLayerConfigs
+              .filter((layer) => typeof preferences.visibleLayers?.[layer.id] === "boolean")
+              .map((layer) => [layer.id, Boolean(preferences.visibleLayers?.[layer.id])])
+          )
+        }));
+      }
+
+      setPreferencesLoaded(true);
+    }
+
+    loadPreferences();
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!preferencesLoaded) {
+      return;
+    }
+
     let ignore = false;
 
     async function loadStatus() {
@@ -270,7 +721,12 @@ export default function App() {
         setStatus(payload);
         setEarliestDate(nextEarliestDate);
         setLatestDate(nextLatestDate);
-        setSelectedDate(nextLatestDate || nextEarliestDate);
+        setSelectedDate(
+          persistedSelectedDate
+            ? clampDate(persistedSelectedDate, nextEarliestDate, nextLatestDate || nextEarliestDate)
+            : nextLatestDate
+        );
+        setTimelinePreviewDate("");
       } catch (error) {
         if (!ignore) {
           setStatus({
@@ -293,7 +749,157 @@ export default function App() {
     return () => {
       ignore = true;
     };
-  }, []);
+  }, [persistedSelectedDate, preferencesLoaded]);
+
+  useEffect(
+    () => () => {
+      clearTimelineCommitTimer();
+    },
+    [clearTimelineCommitTimer]
+  );
+
+  useEffect(() => {
+    if (!hasDateRange || monthlyTimelineDates.length === 0) {
+      return;
+    }
+
+    setTimelineWindowEndIndexPreference((currentEndIndex) => {
+      const currentWindowEndIndex = Math.min(
+        fullTimelineMaxIndex,
+        Math.max(
+          timelineWindowMinEndIndex,
+          currentEndIndex ?? fullTimelineMaxIndex
+        )
+      );
+      const currentWindowStartIndex = Math.max(
+        0,
+        currentWindowEndIndex - TIMELINE_VISIBLE_MONTH_COUNT + 1
+      );
+      let nextWindowEndIndex = currentWindowEndIndex;
+
+      if (selectedDateTimelineIndex < currentWindowStartIndex) {
+        nextWindowEndIndex = Math.min(
+          fullTimelineMaxIndex,
+          Math.max(
+            timelineWindowMinEndIndex,
+            selectedDateTimelineIndex + TIMELINE_VISIBLE_MONTH_COUNT - 1
+          )
+        );
+      } else if (selectedDateTimelineIndex > currentWindowEndIndex) {
+        nextWindowEndIndex = Math.min(
+          fullTimelineMaxIndex,
+          Math.max(timelineWindowMinEndIndex, selectedDateTimelineIndex)
+        );
+      }
+
+      return nextWindowEndIndex === currentEndIndex ? currentEndIndex : nextWindowEndIndex;
+    });
+  }, [
+    fullTimelineMaxIndex,
+    hasDateRange,
+    monthlyTimelineDates.length,
+    selectedDateTimelineIndex,
+    timelineWindowMinEndIndex
+  ]);
+
+  useEffect(() => {
+    if (!preferencesLoaded || !latestDate) {
+      return;
+    }
+
+    writePersistedMobilePreferences({
+      searchQuery,
+      searchTarget,
+      selectedDate: activeTileDate || selectedDate,
+      visibleLayers
+    });
+  }, [
+    activeTileDate,
+    latestDate,
+    preferencesLoaded,
+    searchQuery,
+    searchTarget,
+    selectedDate,
+    visibleLayers
+  ]);
+
+  useEffect(() => {
+    if (!selectedDate || !latestDate) {
+      return;
+    }
+
+    const clampedDate = clampDate(selectedDate, earliestDate, latestDate);
+    if (clampedDate !== selectedDate) {
+      setTimelinePreviewDate("");
+      setSelectedDate(clampedDate);
+    }
+  }, [earliestDate, latestDate, selectedDate]);
+
+  useEffect(() => {
+    if (!searchTarget) {
+      return;
+    }
+
+    mapRef.current?.animateToRegion(regionForTarget(searchTarget), 900);
+  }, [searchTarget]);
+
+  useEffect(() => {
+    if (!status.configured || !latestDate) {
+      return;
+    }
+
+    let ignore = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function tick(warmNextDate: boolean) {
+      const payload = await requestTimelineCacheStatus(warmNextDate);
+      if (ignore) {
+        return;
+      }
+
+      timer = setTimeout(
+        () => tick(!payload?.complete),
+        payload?.complete
+          ? TIMELINE_CACHE_COMPLETE_INTERVAL_MS
+          : TIMELINE_CACHE_ACTIVE_INTERVAL_MS
+      );
+    }
+
+    tick(false);
+
+    return () => {
+      ignore = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [latestDate, requestTimelineCacheStatus, status.configured]);
+
+  useEffect(() => {
+    if (timelineCacheComplete) {
+      timelineCachePulseRef.current.setValue(1);
+      return;
+    }
+
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(timelineCachePulseRef.current, {
+          duration: 700,
+          toValue: 0.55,
+          useNativeDriver: true
+        }),
+        Animated.timing(timelineCachePulseRef.current, {
+          duration: 700,
+          toValue: 1,
+          useNativeDriver: true
+        })
+      ])
+    );
+
+    animation.start();
+
+    return () => animation.stop();
+  }, [timelineCacheComplete]);
 
   const tileLayers = useMemo(
     () =>
@@ -301,15 +907,27 @@ export default function App() {
         .filter((layer) => visibleLayers[layer.id])
         .map((layer, index) => ({
           ...layer,
+          cachePath: activeTileDate ? buildTileCachePath(layer.id, activeTileDate) : undefined,
           opacity: layer.id === "landCover" ? 0.86 : 0.8,
-          url: selectedDate ? buildTileUrl(layer.id, selectedDate, tileRefreshKey) : "",
+          date: activeTileDate,
+          url: activeTileDate ? buildTileUrl(layer.id, activeTileDate) : "",
           zIndex: 20 + index
         })),
-    [selectedDate, tileRefreshKey, visibleLayers]
+    [activeTileDate, visibleLayers]
   );
 
   useEffect(() => {
-    if (!selectedDate || activeLayerLabels.length === 0) {
+    tileLayers.forEach((layer) => {
+      if (layer.cachePath) {
+        FileSystem.makeDirectoryAsync(layer.cachePath, { intermediates: true }).catch(() => {
+          // Native UrlTile still works without a disk cache if the directory cannot be created.
+        });
+      }
+    });
+  }, [tileLayers]);
+
+  useEffect(() => {
+    if (!activeTileDate || activeLayerLabels.length === 0) {
       setTileLoadStatus("idle");
       return;
     }
@@ -322,7 +940,7 @@ export default function App() {
     return () => {
       clearTimeout(loadedTimer);
     };
-  }, [activeLayerKey, activeLayerLabels.length, selectedDate, tileRefreshKey, tileZoomLevel]);
+  }, [activeLayerKey, activeLayerLabels.length, activeTileDate]);
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -341,13 +959,15 @@ export default function App() {
           (layer) =>
             layer.url && (
               <UrlTile
-                key={`${layer.id}-${selectedDate}-z${tileZoomLevel}`}
+                key={`${layer.id}-${layer.date}`}
                 urlTemplate={layer.url}
                 maximumNativeZ={MAX_EARTH_ENGINE_NATIVE_ZOOM}
                 maximumZ={MAX_MAP_ZOOM}
                 minimumZ={MIN_MAP_ZOOM}
                 opacity={layer.opacity}
-                tileCacheMaxAge={60 * 10}
+                shouldReplaceMapContent={false}
+                tileCachePath={layer.cachePath}
+                tileCacheMaxAge={60 * 60 * 24 * 7}
                 tileSize={256}
                 zIndex={layer.zIndex}
               />
@@ -466,29 +1086,123 @@ export default function App() {
             <Text style={styles.dateLabel}>Date</Text>
             <View style={styles.stepper}>
               <Pressable
-                accessibilityLabel="Previous Dynamic World day"
+                accessibilityLabel="Previous Dynamic World month"
                 disabled={!canStepBack}
                 style={[styles.stepButton, !canStepBack && styles.disabledButton]}
-                onPress={() => updateDate(addDays(selectedDate, -1))}
+                onPress={() =>
+                  updateDate(monthlyTimelineDates[selectedTimelineIndex - 1] ?? selectedDate)
+                }
               >
                 <Text style={styles.stepButtonText}>-</Text>
               </Pressable>
-              <Text style={styles.dateValue}>{selectedDate || "Loading"}</Text>
+              <Text style={styles.dateValue}>{selectedDisplayDate}</Text>
               <Pressable
-                accessibilityLabel="Next Dynamic World day"
+                accessibilityLabel="Next Dynamic World month"
                 disabled={!canStepForward}
                 style={[styles.stepButton, !canStepForward && styles.disabledButton]}
-                onPress={() => updateDate(addDays(selectedDate, 1))}
+                onPress={() =>
+                  updateDate(monthlyTimelineDates[selectedTimelineIndex + 1] ?? selectedDate)
+                }
               >
                 <Text style={styles.stepButtonText}>+</Text>
               </Pressable>
             </View>
             <Text style={styles.hint}>
-              Available {earliestDate} to {latestDate || "loading"}. Tile API: {TILE_API_BASE_URL}
+              Slider selects monthly snapshots. Cache warms the visible 12-month window. Tile API:{" "}
+              {TILE_API_BASE_URL}
             </Text>
           </View>
         </View>
       ) : null}
+
+      <View style={styles.timelineOverlay}>
+        <View style={styles.timelineHeader}>
+          <Text style={styles.timelineLabel}>Date</Text>
+          <Text style={styles.timelineDate}>{timelineDisplayDate || "Loading"}</Text>
+        </View>
+        <View style={styles.timelineCacheRow}>
+          <Text style={styles.timelineCacheText}>{timelineCacheReadyText}</Text>
+          <Text style={styles.timelineCacheText}>{timelineActiveStatusText}</Text>
+        </View>
+        <View style={styles.timelineWindowRow}>
+          <Pressable
+            accessibilityLabel="Show previous year of history"
+            accessibilityState={{ disabled: !canJumpTimelineBackYear }}
+            disabled={!canJumpTimelineBackYear}
+            onPress={() => shiftTimelineWindowByYear(-1)}
+            style={[
+              styles.timelineYearButton,
+              !canJumpTimelineBackYear && styles.timelineYearButtonDisabled
+            ]}
+          >
+            <Text style={styles.timelineYearButtonText}>{"< 1Y"}</Text>
+          </Pressable>
+          <Text style={styles.timelineWindowText}>12 mo window</Text>
+          <Pressable
+            accessibilityLabel="Show next year of history"
+            accessibilityState={{ disabled: !canJumpTimelineForwardYear }}
+            disabled={!canJumpTimelineForwardYear}
+            onPress={() => shiftTimelineWindowByYear(1)}
+            style={[
+              styles.timelineYearButton,
+              !canJumpTimelineForwardYear && styles.timelineYearButtonDisabled
+            ]}
+          >
+            <Text style={styles.timelineYearButtonText}>{"1Y >"}</Text>
+          </Pressable>
+        </View>
+        {hasDateRange ? (
+          <View style={styles.timelineSliderWrap}>
+            <View style={styles.timelineSliderTrack}>
+              <Animated.View
+                style={[
+                  styles.timelineReadyTrack,
+                  {
+                    left: `${Math.min(99.2, Math.max(0, cacheReadyStartPercent))}%`,
+                    opacity: timelineCachePulseRef.current
+                  }
+                ]}
+              />
+            </View>
+            <Slider
+              key={`${earliestDate}-${latestDate}`}
+              accessibilityLabel="Monthly historical map date"
+              disabled={!hasMultipleSelectableTimelineDates}
+              lowerLimit={hasMultipleSelectableTimelineDates ? timelineWindowStartIndex : undefined}
+              maximumTrackTintColor="transparent"
+              maximumValue={effectiveTimelineWindowEndIndex}
+              minimumTrackTintColor="transparent"
+              minimumValue={timelineWindowStartIndex}
+              onSlidingComplete={commitTimelineDate}
+              onValueChange={previewTimelineDate}
+              step={1}
+              style={styles.timelineSlider}
+              thumbTintColor="#f6f8f3"
+              upperLimit={
+                hasMultipleSelectableTimelineDates ? effectiveTimelineWindowEndIndex : undefined
+              }
+              value={timelineDisplayIndex}
+            />
+          </View>
+        ) : (
+          <Slider
+            accessibilityLabel="Historical map date loading"
+            disabled
+            maximumTrackTintColor="#466655"
+            maximumValue={1}
+            minimumTrackTintColor="#466655"
+            minimumValue={0}
+            step={1}
+            style={styles.timelineSlider}
+            thumbTintColor="#92aa9c"
+            value={0}
+          />
+        )}
+        <View style={styles.timelineBounds}>
+          <Text style={styles.timelineBoundText}>{timelineWindowStartDate}</Text>
+          <Text style={styles.timelineBoundText}>{timelineWindowEndDate || "checking"}</Text>
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
@@ -705,5 +1419,105 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17,
     marginTop: 8
+  },
+  timelineOverlay: {
+    backgroundColor: "rgba(13,31,26,0.9)",
+    borderColor: "#355244",
+    borderRadius: 8,
+    borderWidth: 1,
+    bottom: 12,
+    left: 12,
+    padding: 12,
+    position: "absolute",
+    right: 12
+  },
+  timelineHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between"
+  },
+  timelineLabel: {
+    color: "#c8d6cd",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  timelineDate: {
+    color: "#f6f8f3",
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  timelineCacheRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 8
+  },
+  timelineCacheText: {
+    color: "#b9c9bf",
+    fontSize: 10,
+    fontWeight: "700"
+  },
+  timelineWindowRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+    justifyContent: "space-between",
+    marginTop: 8
+  },
+  timelineYearButton: {
+    backgroundColor: "#2f8f5b",
+    borderRadius: 6,
+    minWidth: 58,
+    paddingHorizontal: 10,
+    paddingVertical: 6
+  },
+  timelineYearButtonDisabled: {
+    backgroundColor: "#466655",
+    opacity: 0.46
+  },
+  timelineYearButtonText: {
+    color: "#f6f8f3",
+    fontSize: 10,
+    fontWeight: "800",
+    textAlign: "center"
+  },
+  timelineWindowText: {
+    color: "#dce8df",
+    flex: 1,
+    fontSize: 10,
+    fontWeight: "700",
+    textAlign: "center"
+  },
+  timelineSliderWrap: {
+    height: 38,
+    justifyContent: "center",
+    marginTop: 6
+  },
+  timelineSliderTrack: {
+    backgroundColor: "#263d32",
+    borderRadius: 999,
+    height: 5,
+    left: 8,
+    overflow: "hidden",
+    position: "absolute",
+    right: 8
+  },
+  timelineReadyTrack: {
+    backgroundColor: "#76c995",
+    borderRadius: 999,
+    bottom: 0,
+    position: "absolute",
+    right: 0,
+    top: 0
+  },
+  timelineSlider: {
+    height: 38
+  },
+  timelineBounds: {
+    flexDirection: "row",
+    justifyContent: "space-between"
+  },
+  timelineBoundText: {
+    color: "#b9c9bf",
+    fontSize: 10
   }
 });

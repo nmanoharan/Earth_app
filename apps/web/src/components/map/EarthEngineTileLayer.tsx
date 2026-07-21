@@ -82,7 +82,7 @@ function buildTileQueueKey(layerId: ForestLayerId, date: string) {
   return `${layerId}:${date}`;
 }
 
-function addDays(date: string, days: number) {
+function addMonths(date: string, months: number) {
   const parsedDate = new Date(
     /^\d{4}-\d{2}-\d{2}$/.test(date)
       ? `${date}T00:00:00.000Z`
@@ -92,7 +92,15 @@ function addDays(date: string, days: number) {
     return DYNAMIC_WORLD_MIN_DATE;
   }
 
-  parsedDate.setUTCDate(parsedDate.getUTCDate() + days);
+  const day = parsedDate.getUTCDate();
+  parsedDate.setUTCDate(1);
+  parsedDate.setUTCMonth(parsedDate.getUTCMonth() + months);
+
+  const lastDayOfTargetMonth = new Date(
+    Date.UTC(parsedDate.getUTCFullYear(), parsedDate.getUTCMonth() + 1, 0)
+  ).getUTCDate();
+  parsedDate.setUTCDate(Math.min(day, lastDayOfTargetMonth));
+
   return parsedDate.toISOString().slice(0, 10);
 }
 
@@ -425,7 +433,7 @@ export function EarthEngineTileLayer({
         return;
       }
 
-      const adjacentDates = [addDays(activeDate, -1), addDays(activeDate, 1)].filter(
+      const adjacentDates = [addMonths(activeDate, -1), addMonths(activeDate, 1)].filter(
         (candidateDate) =>
           candidateDate >= DYNAMIC_WORLD_MIN_DATE &&
           (!preloadMinDate || candidateDate >= preloadMinDate) &&

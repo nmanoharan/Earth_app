@@ -351,6 +351,29 @@ body {
   width: 100%;
 }
 
+.timelineCacheHeader,
+.dayTimelineCache {
+  align-items: center;
+  color: #4f675c;
+  display: flex;
+  font-size: 0.78rem;
+  justify-content: space-between;
+}
+
+.timelineCacheHeader strong {
+  color: var(--panel-text);
+  font-size: 0.78rem;
+}
+
+@keyframes timelineCacheFill {
+  from {
+    background-position: 0 0, 0 0;
+  }
+  to {
+    background-position: 1.4rem 0, 0 0;
+  }
+}
+
 .mapWrap {
   border-radius: 8px;
   overflow: hidden;
@@ -402,9 +425,97 @@ body {
   text-align: right;
 }
 
+.dayTimelineCache {
+  font-size: 0.72rem;
+}
+
+.dayTimelineWindow {
+  align-items: center;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: 4rem 1fr 4rem;
+}
+
+.dayTimelineWindow button {
+  background: #1f7a4a;
+  border: 1px solid #1f7a4a;
+  border-radius: 6px;
+  color: #f6f8f3;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.35rem 0.45rem;
+}
+
+.dayTimelineWindow button:disabled {
+  background: #8aa194;
+  border-color: #8aa194;
+  cursor: not-allowed;
+}
+
+.dayTimelineWindow span {
+  color: #4f675c;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-align: center;
+}
+
 .dayTimeline input[type="range"] {
+  --cache-ready-start: 100%;
   accent-color: #1f7a4a;
+  appearance: none;
+  background:
+    linear-gradient(
+      90deg,
+      #cbd8cf 0%,
+      #cbd8cf var(--cache-ready-start),
+      #7dc795 var(--cache-ready-start),
+      #1f7a4a 100%
+    );
+  border-radius: 999px;
+  cursor: pointer;
+  height: 0.65rem;
   width: 100%;
+}
+
+.dayTimeline input[type="range"].warming {
+  animation: timelineCacheFill 1.1s linear infinite;
+  background-image:
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.25) 0,
+      rgba(255, 255, 255, 0.25) 0.45rem,
+      transparent 0.45rem,
+      transparent 0.9rem
+    ),
+    linear-gradient(
+      90deg,
+      #cbd8cf 0%,
+      #cbd8cf var(--cache-ready-start),
+      #8ecf9f var(--cache-ready-start),
+      #1f7a4a 100%
+    );
+  background-size: 1.4rem 1.4rem, 100% 100%;
+}
+
+.dayTimeline input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  background: #f6f8f3;
+  border: 2px solid #1f7a4a;
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  height: 1.15rem;
+  width: 1.15rem;
+}
+
+.dayTimeline input[type="range"]::-moz-range-thumb {
+  background: #f6f8f3;
+  border: 2px solid #1f7a4a;
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  height: 1.15rem;
+  width: 1.15rem;
 }
 
 @media (max-width: 900px) {
