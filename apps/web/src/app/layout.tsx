@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "US Dynamic World Land Cover Explorer",
-  description: "Prototype map for Google Earth Engine Dynamic World land-cover exploration."
+  title: "OEOC Dashboard",
+  description: "One Earth One Chance environmental impact dashboard."
 };
 
 export default function RootLayout({

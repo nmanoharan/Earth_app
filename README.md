@@ -1,30 +1,69 @@
-# OEOC Earth
+# OEOC Environmental Impact Dashboard
 
-OEOC Earth is a web and iOS mobile map for exploring Google Earth Engine Dynamic World land-cover data across the United States.
+This repository contains the One Earth One Chance environmental impact dashboard. The current web app maps OEOC work locations, summarizes yearly impact, and exports planting and event reports from the OEOC Tree Map data.
 
-This monorepo includes:
+Production:
 
-- `apps/web`: Next.js web app and API service for Earth Engine tiles, city/state search, timeline cache status, and tile caching.
-- `apps/mobile`: Expo React Native app for iOS/TestFlight.
-- `packages/shared`: shared layer labels, colors, and type definitions used by web and mobile.
-
-## Current Version
-
-- App version: `1.0.0`
-- iOS build number: `6`
+- Dashboard: `https://oeoc-dashboard.vercel.app/oeoc-impact`
+- Help documentation: `https://oeoc-dashboard.vercel.app/oeoc-impact/help`
 - GitHub repository: `https://github.com/nmanoharan/Earth_app`
 
-## Features
+## What Is Included
 
-- Interactive web and mobile maps.
-- Google Dynamic World V1 data from Earth Engine.
-- Tree cover, forest loss, and land-cover layers.
-- City/state search with map recentering.
-- Monthly historical date slider.
-- Latest available data date is read from Earth Engine instead of assuming today's date.
-- 12-month visible timeline window with one-year back/forward controls.
-- Server-side tile cache with Redis/Memorystore support in Cloud Run.
-- Local in-memory cache fallback for development.
+- `apps/web`: Next.js web app for the OEOC dashboard, help documentation, map, charts, and export APIs.
+- `apps/web/src/app/oeoc-impact`: dashboard route.
+- `apps/web/src/app/oeoc-impact/help`: non-technical help, formulas, assumptions, citations, and export instructions.
+- `apps/web/src/app/api/work-locations`: work-location data and export endpoints.
+- `apps/web/src/lib/impactCalculations.ts`: shared impact calculation constants and formulas.
+- `apps/web/src/lib/workLocations.ts`: Google Sheet CSV parsing, geocoding fallbacks, and cached snapshot fallback.
+- `apps/web/src/data/work-location-markers.snapshot.json`: bundled fallback snapshot used when the live Google CSV is unavailable.
+
+## Main Features
+
+- Interactive DFW-centered map of OEOC work locations.
+- Marker colors aligned with yearly chart categories.
+- Location popups with planting, canopy, partner, and impact details.
+- Yearly charts for:
+  - CO2 Removed
+  - Air Pollutants Removed
+  - Runoff Avoided
+  - Cost Savings
+- Graph info panels explaining estimates and source assumptions.
+- Help documentation written for non-technical users.
+- Export by planting city/location/year to Excel.
+- Export selected event to a styled PDF report.
+
+## Exports
+
+The dashboard intentionally keeps only two exports:
+
+1. Planting Excel export
+   - Grouped by year.
+   - Includes City and Planting Location.
+   - Includes event names, planting dates, category, partners, plantings, canopy, impact metrics, costs, volunteer hours, expenses, latitude, longitude, and approximate-location flag.
+
+2. Event PDF export
+   - Controlled only by the `PDF Event` dropdown.
+   - Produces a styled one-event impact report.
+
+The older raw all-data Excel export was removed.
+
+## Calculation Notes
+
+All formulas and assumptions are documented in the app at `/oeoc-impact/help`.
+
+High-level calculation flow:
+
+1. Read the Tree Map sheet or fallback snapshot.
+2. Use planting count when available.
+3. If planting count is missing, convert canopy to planting equivalent using `1,500 sq ft` per tree.
+4. Calculate months active from planting date to estimate date.
+5. Use sheet-provided annual values when available.
+6. Use EPA/i-Tree/USFS fallback estimates when sheet values are missing.
+7. Prorate annual values by months active / 12.
+8. Continue counting prior-year plantings as active contributors in later years.
+
+The dashboard uses pounds, gallons, square feet, counts, and USD in the user interface.
 
 ## Local Run
 
@@ -34,93 +73,54 @@ Install dependencies at the repo root:
 npm install
 ```
 
-Start the web/API app:
+Start the web app:
 
 ```bash
-npm run dev:web
+npm run dev:web -- -- -p 3006
 ```
 
-The web app usually starts at `http://localhost:3000`. If that port is busy, Next.js will choose the next open port.
+Open:
 
-Start the mobile dev server:
+```text
+http://localhost:3006/oeoc-impact
+http://localhost:3006/oeoc-impact/help
+```
+
+## Build
 
 ```bash
-cd apps/mobile
-EXPO_PUBLIC_TILE_API_BASE_URL=http://127.0.0.1:3000 npx expo start --dev-client --host lan
+npm run build:web
 ```
-
-Run the iOS app:
-
-```bash
-cd apps/mobile
-EXPO_PUBLIC_TILE_API_BASE_URL=http://127.0.0.1:3000 npm run ios
-```
-
-If the web/API app is running on a different port, update `EXPO_PUBLIC_TILE_API_BASE_URL` to match.
-
-## Environment
-
-Use `.env.local` files for local values. Never commit real credentials.
-
-Web/API:
-
-```bash
-EE_PROJECT=green-earth-497718
-TILE_CACHE_BACKEND=memory
-```
-
-Cloud Run adds production values for Redis and mobile API authorization.
-
-Mobile:
-
-```bash
-EXPO_PUBLIC_TILE_API_BASE_URL=https://forest-cover-web-661122226827.us-central1.run.app
-EXPO_PUBLIC_MOBILE_API_TOKEN=replace-with-cloud-run-mobile-api-token
-```
-
-## Google Earth Engine
-
-For local development, authenticate Application Default Credentials with Earth Engine scopes:
-
-```bash
-gcloud auth application-default login --scopes=https://www.googleapis.com/auth/earthengine,https://www.googleapis.com/auth/cloud-platform
-```
-
-Then verify:
-
-```bash
-curl http://localhost:3000/api/earth-engine/status
-```
-
-The response should include `"configured": true` and a `latestAvailableDate`.
 
 ## Deployment
 
-Web/API is deployed to Google Cloud Run as `forest-cover-web`.
-
-Mobile iOS builds are deployed through Expo EAS:
+The current OEOC dashboard is deployed to Vercel as `oeoc-dashboard`.
 
 ```bash
-cd apps/mobile
-EAS_BUILD_NO_EXPO_GO_WARNING=true npx eas-cli build --platform ios --profile production --auto-submit --clear-cache --non-interactive
+npx vercel --prod --yes
 ```
 
-The production EAS profile auto-increments the iOS build number.
+Vercel settings are in:
+
+- `vercel.json`
+- `.vercelignore`
+
+Environment files and credentials are ignored and must not be committed.
+
+## Data Source
+
+The app reads OEOC Tree Map data from the configured Google Sheet CSV export when available. If the live sheet is unavailable, it uses the bundled cached snapshot so the dashboard can still load.
+
+## Source Citations
+
+The help page links to the public sources used for calculation methodology, including EPA greenhouse gas equivalencies, EPA tree and vegetation benefits, EPA BenMAP, i-Tree methods and references, and USFS shade-related planning studies.
 
 ## GitHub Versioning
 
-Going forward:
+Recommended workflow:
 
-1. Make changes in the monorepo.
-2. Run mobile and web type checks.
+1. Make changes locally.
+2. Run `npm run build:web`.
 3. Confirm no real secrets are present in source files.
 4. Commit to `main`.
 5. Push to `origin`.
-6. Tag release baselines with `v<app-version>-build.<ios-build-number>`, for example `v1.0.0-build.6`.
-
-Suggested checks:
-
-```bash
-npx tsc -p apps/web/tsconfig.json --noEmit --incremental false
-npx tsc -p apps/mobile/tsconfig.json --noEmit
-```

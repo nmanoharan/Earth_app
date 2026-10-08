@@ -49,6 +49,7 @@ let activeTileQueueKey: string | null = null;
 let activeTileLoads = 0;
 
 type EarthEngineTileLayerProps = {
+  comparisonDate?: string;
   date: string;
   layerId: ForestLayerId;
   opacity: number;
@@ -59,10 +60,12 @@ type EarthEngineTileLayerProps = {
 };
 
 function buildTileUrl({
+  comparisonDate,
   coords,
   date,
   layerId,
 }: {
+  comparisonDate?: string;
   coords: Coords;
   date: string;
   layerId: ForestLayerId;
@@ -75,11 +78,15 @@ function buildTileUrl({
     z: String(coords.z)
   });
 
+  if (comparisonDate) {
+    params.set("comparisonDate", comparisonDate);
+  }
+
   return `/api/earth-engine/tiles?${params.toString()}`;
 }
 
-function buildTileQueueKey(layerId: ForestLayerId, date: string) {
-  return `${layerId}:${date}`;
+function buildTileQueueKey(layerId: ForestLayerId, date: string, comparisonDate?: string) {
+  return comparisonDate ? `${layerId}:${date}:compare:${comparisonDate}` : `${layerId}:${date}`;
 }
 
 function addMonths(date: string, months: number) {
@@ -246,6 +253,7 @@ function setTileLoadPriority(managedLayer: ManagedLayer, priority: number) {
 }
 
 export function EarthEngineTileLayer({
+  comparisonDate,
   date,
   layerId,
   opacity,
@@ -255,6 +263,7 @@ export function EarthEngineTileLayer({
   onTileStatus
 }: EarthEngineTileLayerProps) {
   const map = useMap();
+  const activeDateKey = comparisonDate ?? date;
   const activeLayerRef = useRef<ManagedLayer | null>(null);
   const preloadLayersRef = useRef<Map<string, ManagedLayer>>(new Map());
   const transitionTokenRef = useRef(0);
@@ -265,10 +274,12 @@ export function EarthEngineTileLayer({
     ({
       initialOpacity,
       reportTileStatus,
+      targetComparisonDate,
       targetDate
     }: {
       initialOpacity: number;
       reportTileStatus: boolean;
+      targetComparisonDate?: string;
       targetDate: string;
     }): ManagedLayer => {
       let managedLayer: ManagedLayer;
@@ -285,11 +296,12 @@ export function EarthEngineTileLayer({
           tile.referrerPolicy = "no-referrer";
 
           const tileUrl = buildTileUrl({
+            comparisonDate: targetComparisonDate,
             coords,
             date: targetDate,
             layerId,
           });
-          const tileQueueKey = buildTileQueueKey(layerId, targetDate);
+          const tileQueueKey = buildTileQueueKey(layerId, targetDate, targetComparisonDate);
           let retryAttempt = 0;
           let tileSettled = false;
           let queuedTileLoad: TileLoadTicket | undefined;
@@ -374,7 +386,7 @@ export function EarthEngineTileLayer({
         reportedLoadedTiles: 0,
         reportedErrorTiles: 0,
         tileLoads: new Set(),
-        date: targetDate
+        date: targetComparisonDate ?? targetDate
       };
 
       layer.on("add", () => {
@@ -452,7 +464,8 @@ export function EarthEngineTileLayer({
         const preloadLayer = createManagedLayer({
           initialOpacity: 0,
           reportTileStatus: false,
-          targetDate: adjacentDate
+          targetComparisonDate: comparisonDate ? adjacentDate : undefined,
+          targetDate: comparisonDate ? date : adjacentDate
         });
         preloadLayer.layer.addTo(map);
         preloadLayer.layer.setZIndex(zIndex - 1);
@@ -467,7 +480,16 @@ export function EarthEngineTileLayer({
         }
       });
     },
-    [clearPreloadLayers, createManagedLayer, map, preloadMaxDate, preloadMinDate, zIndex]
+    [
+      clearPreloadLayers,
+      comparisonDate,
+      createManagedLayer,
+      date,
+      map,
+      preloadMaxDate,
+      preloadMinDate,
+      zIndex
+    ]
   );
 
   useEffect(() => {
@@ -479,10 +501,10 @@ export function EarthEngineTileLayer({
     }
 
     const previousLayer = activeLayerRef.current;
-    const preloadedLayer = preloadLayersRef.current.get(date);
+    const preloadedLayer = preloadLayersRef.current.get(activeDateKey);
 
     preloadLayersRef.current.forEach((managedLayer, preloadDate) => {
-      if (preloadDate !== date) {
+      if (preloadDate !== activeDateKey) {
         managedLayer.layer.removeFrom(map);
         preloadLayersRef.current.delete(preloadDate);
       }
@@ -493,10 +515,11 @@ export function EarthEngineTileLayer({
       createManagedLayer({
         initialOpacity: previousLayer ? 0 : opacity,
         reportTileStatus: true,
+        targetComparisonDate: comparisonDate,
         targetDate: date
       });
 
-    preloadLayersRef.current.delete(date);
+    preloadLayersRef.current.delete(activeDateKey);
 
     if (previousLayer && previousLayer.layer !== nextLayer.layer) {
       previousLayer.reportTileStatus = false;
@@ -565,7 +588,7 @@ export function EarthEngineTileLayer({
 
       preloadTimerRef.current = setTimeout(() => {
         if (transitionTokenRef.current === transitionToken) {
-          preloadAdjacentDates(date);
+          preloadAdjacentDates(activeDateKey);
         }
         preloadTimerRef.current = null;
       }, PRELOAD_AFTER_ACTIVE_DELAY_MS);
@@ -589,7 +612,18 @@ export function EarthEngineTileLayer({
         clearTimeout(preloadFallbackTimer);
       }
     };
-  }, [createManagedLayer, date, layerId, map, onTileStatus, opacity, preloadAdjacentDates, zIndex]);
+  }, [
+    activeDateKey,
+    comparisonDate,
+    createManagedLayer,
+    date,
+    layerId,
+    map,
+    onTileStatus,
+    opacity,
+    preloadAdjacentDates,
+    zIndex
+  ]);
 
   return null;
 }

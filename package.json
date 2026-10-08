@@ -3,6 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "workspaces": ["apps/*", "packages/*"],
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
   "scripts": {
     "dev:web": "npm run dev -w apps/web",
     "dev:mobile": "npm run start -w apps/mobile",

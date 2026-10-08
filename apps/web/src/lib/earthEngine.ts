@@ -156,19 +156,23 @@ function tileFromCache(cachedTile: TileCacheEntry, cacheStatus: AuthenticatedTil
 }
 
 function getDynamicWorldTileCacheKey({
+  comparisonDate,
   date,
   layerId,
   x,
   y,
   z
 }: {
+  comparisonDate?: string;
   date: string;
   layerId: ForestLayerId;
   x: number;
   y: number;
   z: number;
 }) {
-  return `${layerId}:${date}:${z}:${x}:${y}`;
+  return comparisonDate
+    ? `${layerId}:${date}:compare:${comparisonDate}:${z}:${x}:${y}`
+    : `${layerId}:${date}:${z}:${x}:${y}`;
 }
 
 async function getCachedDynamicWorldTile(
@@ -477,7 +481,16 @@ function treeProbabilityForDate(date: string, region: unknown) {
   return dynamicWorldMosaicForDate(date, region).select("trees");
 }
 
-function imageForLayer(layerId: ForestLayerId, date: string, region: unknown) {
+function timelineLayerCacheMarker(layerId: ForestLayerId, date: string, comparisonDate?: string) {
+  return comparisonDate && layerId === "forestLoss" ? `${layerId}:${date}` : layerId;
+}
+
+function imageForLayer(
+  layerId: ForestLayerId,
+  date: string,
+  region: unknown,
+  comparisonDate?: string
+) {
   if (layerId === "treeCover") {
     const trees = treeProbabilityForDate(date, region);
     return {
@@ -492,7 +505,7 @@ function imageForLayer(layerId: ForestLayerId, date: string, region: unknown) {
   }
 
   if (layerId === "forestLoss") {
-    const previousTrees = treeProbabilityForDate(addYears(date, -1), region);
+    const previousTrees = treeProbabilityForDate(comparisonDate ?? addYears(date, -1), region);
     const currentTrees = treeProbabilityForDate(date, region);
     const probabilityDrop = previousTrees.subtract(currentTrees).clip(region);
 
@@ -520,27 +533,43 @@ function imageForLayer(layerId: ForestLayerId, date: string, region: unknown) {
   };
 }
 
-function assertValidRequest(layerId: string | null, date: string) {
-  if (layerId !== "treeCover" && layerId !== "forestLoss" && layerId !== "landCover") {
-    throw new Error("Unsupported Dynamic World layer.");
-  }
-
+function assertDynamicWorldDate(date: string) {
   const parsedDate = parseUtcDate(date);
-  if (!parsedDate || date < DYNAMIC_WORLD_MIN_DATE || parsedDate.getUTCFullYear() > getCurrentDynamicWorldYear()) {
+  if (
+    !parsedDate ||
+    date < DYNAMIC_WORLD_MIN_DATE ||
+    parsedDate.getUTCFullYear() > getCurrentDynamicWorldYear()
+  ) {
     throw new Error(
       `Dynamic World daily layers are available from ${DYNAMIC_WORLD_MIN_DATE} through the latest available Earth Engine date.`
     );
   }
 }
 
+function assertValidRequest(layerId: string | null, date: string, comparisonDate?: string) {
+  if (layerId !== "treeCover" && layerId !== "forestLoss" && layerId !== "landCover") {
+    throw new Error("Unsupported Dynamic World layer.");
+  }
+
+  assertDynamicWorldDate(date);
+
+  if (comparisonDate) {
+    assertDynamicWorldDate(comparisonDate);
+  }
+}
+
 async function getMapId({
+  comparisonDate,
   date,
   layerId
 }: {
+  comparisonDate?: string;
   date: string;
   layerId: ForestLayerId;
 }) {
-  const cacheKey = `${layerId}:${date}:us-bounds`;
+  const cacheKey = comparisonDate
+    ? `${layerId}:${date}:compare:${comparisonDate}:us-bounds`
+    : `${layerId}:${date}:us-bounds`;
   const cached = mapIdCache.get(cacheKey);
 
   if (cached) {
@@ -552,17 +581,24 @@ async function getMapId({
       await initializeEarthEngine();
       const region = usBoundsGeometry();
 
-      if (
-        !(await hasDynamicWorldImages(
-          addDays(date, -DYNAMIC_WORLD_DAILY_LOOKBACK_DAYS + 1),
-          addDays(date, 1),
+      const hasCurrentImages = await hasDynamicWorldImages(
+        addDays(date, -DYNAMIC_WORLD_DAILY_LOOKBACK_DAYS + 1),
+        addDays(date, 1),
+        region
+      );
+      const hasComparisonImages =
+        !comparisonDate ||
+        (await hasDynamicWorldImages(
+          addDays(comparisonDate, -DYNAMIC_WORLD_DAILY_LOOKBACK_DAYS + 1),
+          addDays(comparisonDate, 1),
           region
-        ))
-      ) {
+        ));
+
+      if (!hasCurrentImages || !hasComparisonImages) {
         return null;
       }
 
-      const { image, visParams } = imageForLayer(layerId, date, region);
+      const { image, visParams } = imageForLayer(layerId, date, region, comparisonDate);
 
       return new Promise<EarthEngineMapId>((resolve, reject) => {
         image.getMapId(visParams, (mapId: EarthEngineMapId | undefined, error?: string) => {
@@ -586,13 +622,16 @@ async function getMapId({
 }
 
 export async function warmDynamicWorldTimelineDate({
+  comparisonDate,
   date,
   layerId
 }: {
+  comparisonDate?: string;
   date: string;
   layerId: ForestLayerId;
 }) {
   const tile = await getDynamicWorldTile({
+    comparisonDate,
     date,
     layerId,
     x: 3,
@@ -651,21 +690,25 @@ async function fetchEarthEngineTile(tileUrl: string, headers: Record<string, str
 
 export async function getDynamicWorldTile({
   date,
+  comparisonDate,
   layerId,
   x,
   y,
   z
 }: {
   date: string;
+  comparisonDate?: string | null;
   layerId: string | null;
   x: number;
   y: number;
   z: number;
 }): Promise<AuthenticatedTile> {
-  assertValidRequest(layerId, date);
+  const typedComparisonDate = comparisonDate || undefined;
+  assertValidRequest(layerId, date, typedComparisonDate);
 
   const typedLayerId = layerId as ForestLayerId;
   const cacheKey = getDynamicWorldTileCacheKey({
+    comparisonDate: typedComparisonDate,
     date,
     layerId: typedLayerId,
     x,
@@ -675,6 +718,7 @@ export async function getDynamicWorldTile({
 
   const tile = await getCachedDynamicWorldTile(cacheKey, async () => {
     const mapId = await getMapId({
+      comparisonDate: typedComparisonDate,
       date,
       layerId: typedLayerId
     });
@@ -690,7 +734,10 @@ export async function getDynamicWorldTile({
   });
 
   if (tile.status === 200 && !tile.contentType.includes("application/json")) {
-    await markTimelineDateLayerCached(date, typedLayerId);
+    await markTimelineDateLayerCached(
+      typedComparisonDate ?? date,
+      timelineLayerCacheMarker(typedLayerId, date, typedComparisonDate)
+    );
   }
 
   return tile;
